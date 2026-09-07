@@ -1,5 +1,5 @@
 # 文件名: data_engine.py
-# 职责: 独立 Market Data Hub 底层数据引擎 (支持 2年日线 / 1年1H / 30天5M 历史分页拉取 + 实时 Snapshot)
+# 职责: 独立 Market Data Hub 底层数据引擎 (深度历史落盘 + 换棒整点自动增量追加 + 毫秒 Forming Bar 动态合成)
 
 import os
 import time
@@ -47,12 +47,7 @@ class MarketDataHub:
             json.dump({"assets": assets_list}, f, ensure_ascii=False, indent=2)
 
     def fetch_deep_history(self, code: str, ktype_str: str = "DAY", days_back: int = 730):
-        """
-        分页拉取深度历史数据并落盘
-        - DAY: 建议 730 天 (2 年)
-        - 1H:  建议 365 天 (1 年)
-        - 5M:  建议 30 天 (全时段连续)
-        """
+        """深度历史分页拉取并落盘"""
         ctx = self.get_context()
         if ctx is None:
             return None, "OpenD 未连线"
@@ -105,8 +100,44 @@ class MarketDataHub:
         except Exception as e:
             return None, str(e)
 
+    def sync_latest_closed_bar(self, code: str, ktype_str: str = "5M"):
+        """换棒时轻量同步最近 1~2 根已收盘定格柱并追加写入本地 CSV"""
+        ctx = self.get_context()
+        if ctx is None:
+            return None
+
+        try:
+            from moomoo import KLType, AuType, SubType, RET_OK
+            ktype_map = {
+                "5M": (KLType.K_5M, SubType.K_5M),
+                "1H": (KLType.K_60M, SubType.K_60M),
+                "DAY": (KLType.K_DAY, SubType.K_DAY)
+            }
+            kl_target, sub_target = ktype_map.get(ktype_str, (KLType.K_5M, SubType.K_5M))
+            ctx.subscribe([code], [sub_target])
+            time.sleep(0.1)
+
+            ret, df = ctx.get_cur_kline(code, 5, kl_target, AuType.NONE)
+            if ret == RET_OK and not df.empty:
+                df.columns = [c.lower() for c in df.columns]
+                clean_name = code.replace(".", "_")
+                csv_path = os.path.join(DATA_DIR, f"{clean_name}_{ktype_str}.csv")
+
+                if os.path.exists(csv_path):
+                    old_df = pd.read_csv(csv_path)
+                    combined = pd.concat([old_df, df], ignore_index=True)
+                    df_final = combined.drop_duplicates(subset=['time_key'], keep='last').sort_values('time_key').reset_index(drop=True)
+                else:
+                    df_final = df
+
+                df_final.to_csv(csv_path, index=False)
+                return df_final
+        except Exception:
+            pass
+        return None
+
     def get_realtime_snapshot(self, code_list: list):
-        """获取毫秒实时快照，驱动页面跳动"""
+        """获取毫秒实时快照"""
         ctx = self.get_context()
         if ctx is None:
             return None
