@@ -1,5 +1,5 @@
 # 文件名: app.py
-# 职责: Market Data Hub 主控制看板 (可折叠分类总表 + 多周期数据池归档监控 + 动态资产池管理)
+# 职责: Market Data Hub 主控制看板 (可折叠分类总表 + 多周期数据池监控 + 独立图表视图插件挂载)
 
 import streamlit as st
 import pandas as pd
@@ -7,6 +7,7 @@ import os
 import datetime
 import pytz
 from data_engine import hub_engine
+from chart_view_plugin import chart_plugin
 
 tz_ny = pytz.timezone("America/New_York")
 DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "market_data")
@@ -68,7 +69,7 @@ st.markdown(f"""
 </div>
 """, unsafe_allow_html=True)
 
-# 局部刷新区域
+# 区域一：可折叠数据总表 (局部心跳 3 秒刷新)
 @st.fragment(run_every=3.0)
 def render_market_table():
     codes = [a['code'] for a in watchlist]
@@ -95,7 +96,7 @@ def render_market_table():
                 low_p = f"${snap['low_price']:,.2f}" if snap is not None and 'low_price' in snap else "--"
                 vol = f"{int(snap['volume']):,}" if snap is not None and 'volume' in snap else "--"
 
-                # 读取本地 CSV 归档状态
+                # 本地 CSV 归档行数
                 clean_name = code.replace(".", "_")
                 csv_day = os.path.join(DATA_DIR, f"{clean_name}_DAY.csv")
                 csv_1h = os.path.join(DATA_DIR, f"{clean_name}_1H.csv")
@@ -116,7 +117,7 @@ def render_market_table():
                     "2年日线归档": f"{cnt_day} 根",
                     "1年1H归档": f"{cnt_1h} 根",
                     "30天5M归档": f"{cnt_5m} 根",
-                    "数据通道": "🟢 正常"
+                    "通道状态": "🟢 正常"
                 })
 
             if rows:
@@ -125,4 +126,19 @@ def render_market_table():
 
 render_market_table()
 
-st.info("💡 提示：本页面为纯粹的 **Market Data Hub** 数据基座。数据池已稳定沉淀到本地，下一步我们将接入独立的 K 线图表与分析插件[cite: 1, 2, 6]。")
+st.markdown("---")
+
+# 区域二：独立图表穿透与分析插件挂载区
+st.subheader("📊 标的多周期走势穿透 (Chart View Plugin)")
+
+col_sel1, col_sel2, col_sel3 = st.columns([2, 1, 1])
+with col_sel1:
+    code_options = [a['code'] for a in watchlist]
+    selected_code = st.selectbox("选择要查看的标的", code_options, index=0 if code_options else 0)
+with col_sel2:
+    selected_ktype = st.selectbox("K线周期", ["5M", "1H", "DAY"], index=0)
+with col_sel3:
+    selected_count = st.slider("展示根数", min_value=30, max_value=200, value=60, step=10)
+
+if selected_code:
+    chart_plugin.render_chart(code=selected_code, ktype=selected_ktype, bar_count=selected_count)
