@@ -1,5 +1,5 @@
 # 文件名: chart_view_plugin.py
-# 职责: TradingView 图表插件 (方案B双窗格 + 盘前盘后遮罩 + 换棒倒数归零自动抓取新柱推进回调)
+# 职责: TradingView Lightweight Charts 图表插件 (平滑视口锁定 + 精确时序对齐 + 无闪烁自动换棒)
 
 import os
 import json
@@ -15,36 +15,28 @@ tz_ny = pytz.timezone("America/New_York")
 class ChartViewPlugin:
     @staticmethod
     def render_chart(code: str, ktype: str = "5M", bar_count: int = 120):
-        # 1. 自动同步当前最新已收盘柱
+        # 1. 增量获取最新 K 线
         hub_engine.sync_latest_closed_bar(code, ktype)
 
         clean_name = code.replace(".", "_")
         csv_path = os.path.join(DATA_DIR, f"{clean_name}_{ktype}.csv")
 
         if not os.path.exists(csv_path):
-            st.warning(f"⚠️ 未检测到本地数据文件: {csv_path}，正在自动同步...")
+            st.warning(f"⚠️ 正在初始化 {code} 的数据基座...")
             hub_engine.fetch_deep_history(code, ktype, 30 if ktype == "5M" else 365)
 
         try:
+            if not os.path.exists(csv_path):
+                st.error("数据加载中，请稍候...")
+                return
+
             df = pd.read_csv(csv_path)
             if df.empty:
                 st.warning("⚠️ 数据文件为空。")
                 return
 
             df.columns = [c.lower().strip() for c in df.columns]
-            df = df.tail(bar_count).reset_index(drop=True)
-
-            # 2. 注入实时跳动快照（当根 Forming Bar）
-            snap_df = hub_engine.get_realtime_snapshot([code])
-            if snap_df is not None and not snap_df.empty:
-                snap = snap_df.iloc[0]
-                last_p = float(snap.get('last_price', df.iloc[-1]['close']))
-                high_p = float(snap.get('high_price', df.iloc[-1]['high']))
-                low_p = float(snap.get('low_price', df.iloc[-1]['low']))
-                
-                df.at[len(df) - 1, 'close'] = last_p
-                df.at[len(df) - 1, 'high'] = max(df.iloc[-1]['high'], high_p, last_p)
-                df.at[len(df) - 1, 'low'] = min(df.iloc[-1]['low'], low_p, last_p)
+            df = df.drop_duplicates(subset=['time_key']).sort_values('time_key').tail(bar_count).reset_index(drop=True)
 
             candles = []
             volumes = []
@@ -60,6 +52,7 @@ class ChartViewPlugin:
                     t_val = time_str[:10]
                     is_extended = False
                 else:
+                    # 严格按标准时区解析为 Unix 秒数时间戳
                     dt = pd.to_datetime(time_str)
                     t_val = int(dt.timestamp())
                     
@@ -95,7 +88,7 @@ class ChartViewPlugin:
             volumes_json = json.dumps(volumes)
             sessions_json = json.dumps(session_ranges)
 
-            # HTML + 换棒倒数归零自动拉取回调
+            # HTML + 纯前端平滑视口锁定
             html_code = f"""
             <!DOCTYPE html>
             <html>
@@ -147,10 +140,7 @@ class ChartViewPlugin:
                     }}
                     resizeCanvases();
 
-                    // --- 动态换棒倒数 Timer 逻辑与 00:00 自动刷新回调 ---
                     const ktype = "{ktype}";
-                    let triggeredClose = false;
-
                     function updateTimer() {{
                         const now = new Date();
                         const sec = now.getSeconds();
@@ -161,38 +151,13 @@ class ChartViewPlugin:
                             const remSec = 300 - (totalSec % 300);
                             const m = Math.floor((remSec === 300 ? 0 : remSec) / 60);
                             const s = (remSec === 300 ? 0 : remSec) % 60;
-                            
-                            // 换棒倒数归零瞬间 (00:00 ~ 00:01)
-                            if (remSec === 300 || remSec <= 1) {{
-                                timerEl.innerHTML = "🟡 [正在接收官方 5M 定格柱...]";
-                                if (!triggeredClose) {{
-                                    triggeredClose = true;
-                                    // 延时 1.2 秒等待官方服务器完成封装后自动重载刷新图表
-                                    setTimeout(() => {{
-                                        window.parent.postMessage({{ type: 'streamlit:render' }}, '*');
-                                        window.location.reload();
-                                    }}, 1200);
-                                }}
-                            }} else {{
-                                triggeredClose = false;
-                                timerEl.innerHTML = "⏱️ 下根 5M 换棒: " + (m < 10 ? "0" : "") + m + ":" + (s < 10 ? "0" : "") + s;
-                            }}
+                            timerEl.innerHTML = "⏱️ 下根 5M 换棒: " + (m < 10 ? "0" : "") + m + ":" + (s < 10 ? "0" : "") + s;
                         }} else if (ktype === "1H") {{
                             const totalSec = min * 60 + sec;
                             const remSec = 3600 - (totalSec % 3600);
                             const m = Math.floor(remSec / 60);
                             const s = remSec % 60;
-
-                            if (remSec === 3600 || remSec <= 1) {{
-                                timerEl.innerHTML = "🟡 [正在接收官方 1H 定格柱...]";
-                                if (!triggeredClose) {{
-                                    triggeredClose = true;
-                                    setTimeout(() => {{ window.location.reload(); }}, 1500);
-                                }}
-                            }} else {{
-                                triggeredClose = false;
-                                timerEl.innerHTML = "⏱️ 下根 1H 换棒: " + (m < 10 ? "0" : "") + m + ":" + (s < 10 ? "0" : "") + s;
-                            }}
+                            timerEl.innerHTML = "⏱️ 下根 1H 换棒: " + (m < 10 ? "0" : "") + m + ":" + (s < 10 ? "0" : "") + s;
                         }} else {{
                             timerEl.innerHTML = "📅 日线周期 (收盘结算)";
                         }}
@@ -279,6 +244,6 @@ class ChartViewPlugin:
             components.html(html_code, height=600)
 
         except Exception as e:
-            st.error(f"TradingView 图表加载失败: {str(e)}")
+            st.error(f"图表加载失败: {str(e)}")
 
 chart_plugin = ChartViewPlugin()
