@@ -1,0 +1,28 @@
+{
+  "assets": [
+    {
+      "code": "US.QQQ",
+      "name": "纳指100 ETF",
+      "category": "🚀 核心指数",
+      "type": "STOCK"
+    },
+    {
+      "code": "US.SPY",
+      "name": "标普500 ETF",
+      "category": "🚀 核心指数",
+      "type": "STOCK"
+    },
+    {
+      "code": "US.NVDA",
+      "name": "英伟达",
+      "category": "🏛️ 科技巨头",
+      "type": "STOCK"
+    },
+    {
+      "code": "CC.BTCUSD",
+      "name": "比特币现货",
+      "category": "🪙 加密资产",
+      "type": "CRYPTO"
+    }
+  ]
+}
