@@ -1,5 +1,5 @@
 # 文件名: chart_view_plugin.py
-# 职责: TradingView Lightweight Charts 图表插件 (方案B: 独立双窗格 K线75% + Volume 25% + 盘前盘后阴影遮罩)
+# 职责: TradingView Lightweight Charts 图表插件 (双窗格 + 盘前盘后阴影遮罩 + 原厂动态换棒倒数 Timer)
 
 import os
 import json
@@ -79,7 +79,7 @@ class ChartViewPlugin:
             volumes_json = json.dumps(volumes)
             sessions_json = json.dumps(session_ranges)
 
-            # HTML + 独立双窗格 (Main 75% + Volume 25%)
+            # HTML + TradingView 原生倒数 Timer + 独立双窗格
             html_code = f"""
             <!DOCTYPE html>
             <html>
@@ -92,17 +92,26 @@ class ChartViewPlugin:
                     #vol_wrapper {{ position: relative; width: 100%; height: 160px; margin-top: 4px; }}
                     .chart-box {{ width: 100%; height: 100%; position: absolute; z-index: 2; }}
                     .shading-layer {{ width: 100%; height: 100%; position: absolute; top: 0; left: 0; z-index: 1; pointer-events: none; }}
-                    .split-title {{ position: absolute; left: 10px; top: 6px; z-index: 10; font-size: 11px; font-weight: bold; color: #8b949e; background: rgba(22, 27, 34, 0.8); padding: 2px 6px; border-radius: 4px; pointer-events: none; }}
+                    
+                    /* 顶部标题与 TradingView 原生微型 Timer */
+                    .chart-header {{ position: absolute; top: 6px; left: 10px; right: 10px; z-index: 10; display: flex; justify-content: space-between; align-items: center; pointer-events: none; }}
+                    .badge-tag {{ font-size: 11px; font-weight: bold; color: #8b949e; background: rgba(22, 27, 34, 0.85); border: 1px solid #30363d; padding: 3px 8px; border-radius: 4px; }}
+                    .tv-timer {{ font-size: 12px; font-family: monospace; font-weight: bold; color: #ffd700; background: rgba(22, 27, 34, 0.9); border: 1px solid #d29922; padding: 3px 10px; border-radius: 4px; }}
                 </style>
             </head>
             <body>
                 <div id="main_wrapper">
-                    <div class="split-title">K线走势 · 75% 窗格</div>
+                    <div class="chart-header">
+                        <span class="badge-tag">📊 K线走势 ({code} · {ktype})</span>
+                        <span id="tv_countdown" class="tv-timer">⏱️ 倒计时计算中...</span>
+                    </div>
                     <canvas id="main_shading" class="shading-layer"></canvas>
                     <div id="main_chart" class="chart-box"></div>
                 </div>
                 <div id="vol_wrapper">
-                    <div class="split-title">机构量能 (Volume) · 25% 独立窗格</div>
+                    <div class="chart-header">
+                        <span class="badge-tag">机构量能 (Volume) · 25% 窗格</span>
+                    </div>
                     <canvas id="vol_shading" class="shading-layer"></canvas>
                     <div id="vol_chart" class="chart-box"></div>
                 </div>
@@ -114,6 +123,7 @@ class ChartViewPlugin:
                     const volCanvas = document.getElementById('vol_shading');
                     const ctxMain = mainCanvas.getContext('2d');
                     const ctxVol = volCanvas.getContext('2d');
+                    const timerEl = document.getElementById('tv_countdown');
 
                     function resizeCanvases() {{
                         mainCanvas.width = mainWrapper.clientWidth;
@@ -123,6 +133,32 @@ class ChartViewPlugin:
                     }}
                     resizeCanvases();
 
+                    // --- 动态换棒倒数 Timer 逻辑 ---
+                    const ktype = "{ktype}";
+                    function updateTimer() {{
+                        const now = new Date();
+                        const sec = now.getSeconds();
+                        const min = now.getMinutes();
+
+                        if (ktype === "5M") {{
+                            const totalSec = min * 60 + sec;
+                            const remSec = 300 - (totalSec % 300);
+                            const m = Math.floor((remSec === 300 ? 0 : remSec) / 60);
+                            const s = (remSec === 300 ? 0 : remSec) % 60;
+                            timerEl.innerHTML = "⏱️ 下根 5M 换棒: " + (m < 10 ? "0" : "") + m + ":" + (s < 10 ? "0" : "") + s;
+                        }} else if (ktype === "1H") {{
+                            const totalSec = min * 60 + sec;
+                            const remSec = 3600 - (totalSec % 3600);
+                            const m = Math.floor(remSec / 60);
+                            const s = remSec % 60;
+                            timerEl.innerHTML = "⏱️ 下根 1H 换棒: " + (m < 10 ? "0" : "") + m + ":" + (s < 10 ? "0" : "") + s;
+                        }} else {{
+                            timerEl.innerHTML = "📅 日线周期 (收盘结算)";
+                        }}
+                    }}
+                    updateTimer();
+                    setInterval(updateTimer, 1000);
+
                     const commonOptions = {{
                         layout: {{ background: {{ type: 'solid', color: 'transparent' }}, textColor: '#8b949e', fontSize: 11 }},
                         grid: {{ vertLines: {{ color: '#161b22' }}, horzLines: {{ color: '#161b22' }} }},
@@ -131,7 +167,6 @@ class ChartViewPlugin:
                         timeScale: {{ borderColor: '#30363d', timeVisible: true, secondsVisible: false }},
                     }};
 
-                    // 1. 上层主图 (75%)
                     const mainChart = LightweightCharts.createChart(document.getElementById('main_chart'), {{
                         ...commonOptions,
                         timeScale: {{ ...commonOptions.timeScale, visible: false }},
@@ -141,7 +176,6 @@ class ChartViewPlugin:
                     }});
                     mainSeries.setData({candles_json});
 
-                    // 2. 下层副图 (25%)
                     const volChart = LightweightCharts.createChart(document.getElementById('vol_chart'), {{
                         ...commonOptions,
                         rightPriceScale: {{ borderColor: '#30363d', autoScale: true, scaleMargins: {{ top: 0.1, bottom: 0 }} }}
@@ -151,7 +185,6 @@ class ChartViewPlugin:
                     }});
                     volumeSeries.setData({volumes_json});
 
-                    // 双窗格时间轴缩放平移双向绑定
                     let isSyncing = false;
                     mainChart.timeScale().subscribeVisibleLogicalRangeChange(range => {{
                         if (isSyncing || !range) return;
@@ -169,7 +202,6 @@ class ChartViewPlugin:
                         drawShadings();
                     }});
 
-                    // 盘前盘后遮罩渲染
                     const sessionRanges = {sessions_json};
                     function drawShadings() {{
                         ctxMain.clearRect(0, 0, mainCanvas.width, mainCanvas.height);
