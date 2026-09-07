@@ -1,5 +1,5 @@
 # 文件名: app.py
-# 职责: Market Data Hub 交互式主页面 (可折叠分类/多级合并表头/动态增删标的/局部心跳跳动)
+# 职责: Market Data Hub 主控制看板 (可折叠分类总表 + 多周期数据池归档监控 + 动态资产池管理)
 
 import streamlit as st
 import pandas as pd
@@ -9,23 +9,23 @@ import pytz
 from data_engine import hub_engine
 
 tz_ny = pytz.timezone("America/New_York")
+DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "market_data")
+
 st.set_page_config(page_title="Market Data Hub V2", page_icon="🏛️", layout="wide")
 
-# 暗黑金融终端样式注入
+# 暗黑金融终端样式
 st.markdown("""
 <style>
     .block-container { padding-top: 1.2rem; padding-bottom: 0rem; max-width: 98%; }
-    .metric-card { background: #161b22; border: 1px solid #30363d; border-radius: 6px; padding: 10px; margin-bottom: 8px; }
     .status-tag { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 11px; font-family: monospace; font-weight: bold; }
     .tag-green { background: #238636; color: white; }
     .tag-blue { background: #1f6feb; color: white; }
 </style>
 """, unsafe_allow_html=True)
 
-# 标的资产池读取
 watchlist = hub_engine.load_watchlist()
 
-# 侧边栏：标的动态资产池管理器 (➕ 添加 / 🗑️ 删除)
+# 侧边栏：标的管理与一键 Fetch
 with st.sidebar:
     st.header("⚙️ 标的管理中枢")
     with st.expander("➕ 添加新标的", expanded=False):
@@ -42,7 +42,7 @@ with st.sidebar:
 
     st.markdown("---")
     st.markdown("##### 标的清单与操作")
-    for idx, item in enumerate(watchlist):
+    for item in watchlist:
         c1, c2 = st.columns([3, 1])
         c1.markdown(f"**{item['code']}** ({item['name']})")
         if c2.button("🗑️", key=f"del_{item['code']}"):
@@ -51,12 +51,12 @@ with st.sidebar:
             st.rerun()
 
     st.markdown("---")
-    if st.button("⚡ 一键增量同步所有标的数据", use_container_width=True):
-        with st.spinner("正在拉取全量数据..."):
+    if st.button("⚡ 一键增量同步全部标的 (日/1H/5M)", use_container_width=True):
+        with st.spinner("正在拉取深度历史数据..."):
             for item in watchlist:
-                hub_engine.fetch_closed_kline(item['code'], "5M", 120)
-                hub_engine.fetch_closed_kline(item['code'], "1H", 120)
-                hub_engine.fetch_closed_kline(item['code'], "DAY", 60)
+                hub_engine.fetch_deep_history(item['code'], "DAY", 730)
+                hub_engine.fetch_deep_history(item['code'], "1H", 365)
+                hub_engine.fetch_deep_history(item['code'], "5M", 30)
         st.success("全部数据已增量归档！")
 
 # 顶栏全局状态
@@ -68,19 +68,17 @@ st.markdown(f"""
 </div>
 """, unsafe_allow_html=True)
 
-# 局部心跳渲染区域 (驱动实时数据与折叠表格)
-@st.fragment(run_every=2.0)
+# 局部刷新区域
+@st.fragment(run_every=3.0)
 def render_market_table():
     codes = [a['code'] for a in watchlist]
     snap_df = hub_engine.get_realtime_snapshot(codes) if codes else None
     
-    # 构造表格快照字典
     snap_map = {}
     if snap_df is not None and not snap_df.empty:
         for _, r in snap_df.iterrows():
             snap_map[r['code']] = r
 
-    # 按 Category 进行可收缩折叠展示
     categories = sorted(list(set(a.get("category", "默认板块") for a in watchlist)))
 
     for cat in categories:
@@ -97,21 +95,28 @@ def render_market_table():
                 low_p = f"${snap['low_price']:,.2f}" if snap is not None and 'low_price' in snap else "--"
                 vol = f"{int(snap['volume']):,}" if snap is not None and 'volume' in snap else "--"
 
-                # 检查本地 CSV 存储行数状态
+                # 读取本地 CSV 归档状态
                 clean_name = code.replace(".", "_")
-                csv_5m = os.path.join(hub_engine.load_watchlist and "market_data", f"{clean_name}_5M.csv")
-                count_5m = len(pd.read_csv(csv_5m)) if os.path.exists(csv_5m) else 0
+                csv_day = os.path.join(DATA_DIR, f"{clean_name}_DAY.csv")
+                csv_1h = os.path.join(DATA_DIR, f"{clean_name}_1H.csv")
+                csv_5m = os.path.join(DATA_DIR, f"{clean_name}_5M.csv")
+
+                cnt_day = len(pd.read_csv(csv_day)) if os.path.exists(csv_day) else 0
+                cnt_1h = len(pd.read_csv(csv_1h)) if os.path.exists(csv_1h) else 0
+                cnt_5m = len(pd.read_csv(csv_5m)) if os.path.exists(csv_5m) else 0
 
                 rows.append({
-                    "标的代码 (Ticker)": code,
+                    "标的代码": code,
                     "标的名称": item['name'],
-                    "最新现价 (Last)": last_price,
-                    "涨跌幅 (%)": change_rate,
-                    "当日最高 (High)": high_p,
-                    "当日最低 (Low)": low_p,
-                    "成交量 (Vol)": vol,
-                    "本地 5M 归档行数": f"{count_5m} 根",
-                    "数据通道状态": "🟢 正常"
+                    "最新现价": last_price,
+                    "涨跌幅": change_rate,
+                    "日最高": high_p,
+                    "日最低": low_p,
+                    "成交量": vol,
+                    "2年日线归档": f"{cnt_day} 根",
+                    "1年1H归档": f"{cnt_1h} 根",
+                    "30天5M归档": f"{cnt_5m} 根",
+                    "数据通道": "🟢 正常"
                 })
 
             if rows:
@@ -120,4 +125,4 @@ def render_market_table():
 
 render_market_table()
 
-st.info("💡 提示：本页面为纯粹的 **Market Data Hub** 数据基座。后续任何分析模型（TD/波浪/VPA）均作为独立插件在下方挂载。")
+st.info("💡 提示：本页面为纯粹的 **Market Data Hub** 数据基座。数据池已稳定沉淀到本地，下一步我们将接入独立的 K 线图表与分析插件[cite: 1, 2, 6]。")
