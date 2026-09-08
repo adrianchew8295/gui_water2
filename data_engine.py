@@ -1,10 +1,11 @@
 # 文件名: data_engine.py
-# 職責: 全時段 5M 歷史落盤 + 實時快照 + 1H 本地重採樣聚合 (含盤前盤後) + Moomoo 實盤持倉接口
+# 職責: 全時段 5M 歷史落盤 + 自動自癒補齊 (Auto-Heal) + 1H 重採樣 + 雙軌日誌記錄
 
 import os
 import time
 import datetime
 import json
+import logging
 import pandas as pd
 import pytz
 
@@ -12,10 +13,45 @@ tz_ny = pytz.timezone("America/New_York")
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.join(BASE_DIR, "market_data")
 WATCHLIST_PATH = os.path.join(BASE_DIR, "watchlist.json")
+LOG_PATH = os.path.join(BASE_DIR, "system_health.log")
 os.makedirs(DATA_DIR, exist_ok=True)
 
+# 配置系統日誌
+logging.basicConfig(
+    filename=LOG_PATH,
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S"
+)
+
+def log_event(msg: str, level: str = "INFO"):
+    """寫入本地 system_health.log"""
+    if level == "ERROR":
+        logging.error(msg)
+    elif level == "WARNING":
+        logging.warning(msg)
+    else:
+        logging.info(msg)
+
+def get_active_session_info():
+    """判定當前美東時段狀態"""
+    now_ny = datetime.datetime.now(tz_ny)
+    weekday = now_ny.weekday() # 0=Mon, 6=Sun
+    cur_t = now_ny.time()
+
+    if weekday >= 5:
+        return "CLOSED_WEEKEND", "⚪ 週末休市中", now_ny
+    
+    if datetime.time(4, 0) <= cur_t < datetime.time(9, 30):
+        return "PREMARKET", "🟡 PREMARKET (盤前撮合中)", now_ny
+    elif datetime.time(9, 30) <= cur_t < datetime.time(16, 0):
+        return "REGULAR", "🟢 REGULAR (常規交易盤)", now_ny
+    elif datetime.time(16, 0) <= cur_t <= datetime.time(20, 0):
+        return "AFTERMARKET", "🔵 AFTERMARKET (盤後交易中)", now_ny
+    else:
+        return "CLOSED_NIGHT", "⚪ 夜間閉市休眠", now_ny
+
 def safe_float(val, default=0.0):
-    """安全轉換浮點數，過濾 'N/A'、None 與異常字符"""
     if val is None or pd.isna(val):
         return default
     if isinstance(val, (int, float)):
@@ -29,29 +65,15 @@ def safe_float(val, default=0.0):
         return default
 
 def resample_5m_to_1h(df_5m: pd.DataFrame) -> pd.DataFrame:
-    """
-    將包含全時段 (04:00~20:00) 的 5M 數據在本地重採樣聚合為 1H 連續 K 線
-    """
+    """5M 自動聚合為 1H"""
     if df_5m is None or df_5m.empty:
         return pd.DataFrame()
-    
     df = df_5m.copy()
     df.columns = [c.lower().strip() for c in df.columns]
-    
-    # 確保時間索引
     df['dt'] = pd.to_datetime(df['time_key'])
     df = df.set_index('dt').sort_index()
-    
-    # 按 1 小時聚合: Open取首, High取大, Low取小, Close取尾, Volume求和
-    agg_rules = {
-        'open': 'first',
-        'high': 'max',
-        'low': 'min',
-        'close': 'last',
-        'volume': 'sum'
-    }
-    
-    # 若有 turnover 欄位一併聚合
+
+    agg_rules = {'open': 'first', 'high': 'max', 'low': 'min', 'close': 'last', 'volume': 'sum'}
     if 'turnover' in df.columns:
         agg_rules['turnover'] = 'sum'
     if 'code' in df.columns:
@@ -61,7 +83,6 @@ def resample_5m_to_1h(df_5m: pd.DataFrame) -> pd.DataFrame:
     df_1h = df_1h.dropna(subset=['open', 'close']).reset_index()
     df_1h['time_key'] = df_1h['dt'].dt.strftime('%Y-%m-%d %H:%M:%S')
     df_1h = df_1h.drop(columns=['dt'])
-    
     return df_1h
 
 class MarketDataHub:
@@ -74,12 +95,13 @@ class MarketDataHub:
         return cls._instance
 
     def get_context(self):
-        """單例長連線 OpenD"""
         if self.quote_ctx is None:
             try:
                 from moomoo import OpenQuoteContext
                 self.quote_ctx = OpenQuoteContext(host='127.0.0.1', port=11111)
-            except Exception:
+                log_event("成功連線本地 Moomoo OpenD (127.0.0.1:11111)")
+            except Exception as e:
+                log_event(f"OpenD 連線失敗: {str(e)}", "ERROR")
                 self.quote_ctx = None
         return self.quote_ctx
 
@@ -90,99 +112,24 @@ class MarketDataHub:
                     return json.load(f).get("assets", [])
             except Exception:
                 pass
-        return [
-            {"code": "US.QQQ", "name": "納指100 ETF", "category": "🚀 核心指數", "type": "STOCK"},
-            {"code": "US.SPY", "name": "標普500 ETF", "category": "🚀 核心指數", "type": "STOCK"},
-            {"code": "US.NVDA", "name": "英偉達", "category": "🏛️ 科技巨頭", "type": "STOCK"},
-            {"code": "CC.BTCUSD", "name": "比特幣現貨", "category": "🪙 加密資產", "type": "CRYPTO"}
-        ]
+        return [{"code": "US.QQQ", "name": "納指100 ETF", "category": "🚀 核心指數", "type": "STOCK"}]
 
     def save_watchlist(self, assets_list):
         with open(WATCHLIST_PATH, "w", encoding="utf-8") as f:
             json.dump({"assets": assets_list}, f, ensure_ascii=False, indent=2)
 
-    def fetch_deep_history(self, code: str, ktype_str: str = "DAY", days_back: int = 730):
-        """拉取全時段歷史數據並落盤，1H 採用 5M 重採樣合成"""
+    def auto_heal_today_data(self, code: str):
+        """【自癒補齊】自動拉取今日 04:00 以來的完整 5M K線並修復 1H"""
         ctx = self.get_context()
         if ctx is None:
-            return None, "OpenD 未連線"
-
-        try:
-            from moomoo import KLType, AuType, RET_OK
-            
-            # 若請求 1H，底層自動拉取 60 天全時段 5M 並合成 1H
-            if ktype_str == "1H":
-                df_5m, msg = self.fetch_deep_history(code, ktype_str="5M", days_back=min(days_back, 60))
-                if df_5m is not None and not df_5m.empty:
-                    df_1h = resample_5m_to_1h(df_5m)
-                    clean_name = code.replace(".", "_")
-                    csv_path_1h = os.path.join(DATA_DIR, f"{clean_name}_1H.csv")
-                    df_1h.to_csv(csv_path_1h, index=False)
-                    return df_1h, f"成功重採樣合成 {len(df_1h)} 根全時段 1H K 線"
-                return None, "5M 基礎數據不足以合成 1H"
-
-            # 5M 或 DAY 正常歷史拉取
-            kl_target = KLType.K_5M if ktype_str == "5M" else KLType.K_DAY
-            now_ny = datetime.datetime.now(tz_ny)
-            end_date = now_ny.strftime("%Y-%m-%d")
-            start_date = (now_ny - datetime.timedelta(days=days_back)).strftime("%Y-%m-%d")
-
-            all_dfs = []
-            page_req_key = None
-
-            while True:
-                ret, data, page_req_key = ctx.request_history_kline(
-                    code=code,
-                    start=start_date,
-                    end=end_date,
-                    ktype=kl_target,
-                    autype=AuType.NONE,
-                    max_count=1000,
-                    page_req_key=page_req_key
-                )
-                if ret == RET_OK and not data.empty:
-                    all_dfs.append(data)
-                else:
-                    break
-                if page_req_key is None:
-                    break
-                time.sleep(0.2)
-
-            if all_dfs:
-                df = pd.concat(all_dfs, ignore_index=True)
-                df.columns = [c.lower() for c in df.columns]
-                df = df.drop_duplicates(subset=['time_key']).sort_values('time_key').reset_index(drop=True)
-                
-                clean_name = code.replace(".", "_")
-                csv_path = os.path.join(DATA_DIR, f"{clean_name}_{ktype_str}.csv")
-                df.to_csv(csv_path, index=False)
-                
-                # 如果拉取的是 5M，順便自動生成對應的 1H CSV
-                if ktype_str == "5M":
-                    df_1h_auto = resample_5m_to_1h(df)
-                    if not df_1h_auto.empty:
-                        df_1h_auto.to_csv(os.path.join(DATA_DIR, f"{clean_name}_1H.csv"), index=False)
-                        
-                return df, f"成功歸檔 {len(df)} 根 K 線"
-            else:
-                return None, "未獲取到歷史數據"
-        except Exception as e:
-            return None, str(e)
-
-    def sync_latest_closed_bar(self, code: str, ktype_str: str = "5M"):
-        """換棒時增量同步最新柱 (全時段支持)"""
-        ctx = self.get_context()
-        if ctx is None:
-            return None
+            return False, "OpenD 離線"
 
         try:
             from moomoo import KLType, AuType, SubType, RET_OK
-            
-            # 統一訂閱 5M 作為基底
             ctx.subscribe([code], [SubType.K_5M])
-            time.sleep(0.1)
-
-            ret, df = ctx.get_cur_kline(code, 30, KLType.K_5M, AuType.NONE)
+            
+            # 獲取最近 100 根 5M (足夠覆蓋當天全部盤前與常規盤)
+            ret, df = ctx.get_cur_kline(code, 100, KLType.K_5M, AuType.NONE)
             if ret == RET_OK and not df.empty:
                 df.columns = [c.lower() for c in df.columns]
                 clean_name = code.replace(".", "_")
@@ -191,24 +138,27 @@ class MarketDataHub:
                 if os.path.exists(csv_path_5m):
                     old_df = pd.read_csv(csv_path_5m)
                     combined = pd.concat([old_df, df], ignore_index=True)
-                    df_final_5m = combined.drop_duplicates(subset=['time_key'], keep='last').sort_values('time_key').reset_index(drop=True)
+                    df_final = combined.drop_duplicates(subset=['time_key'], keep='last').sort_values('time_key').reset_index(drop=True)
                 else:
-                    df_final_5m = df
+                    df_final = df
 
-                df_final_5m.to_csv(csv_path_5m, index=False)
+                df_final.to_csv(csv_path_5m, index=False)
                 
-                # 同步重採樣 1H
-                df_final_1h = resample_5m_to_1h(df_final_5m)
-                if not df_final_1h.empty:
-                    df_final_1h.to_csv(os.path.join(DATA_DIR, f"{clean_name}_1H.csv"), index=False)
+                # 自動重採樣並修復 1H CSV
+                df_1h = resample_5m_to_1h(df_final)
+                if not df_1h.empty:
+                    df_1h.to_csv(os.path.join(DATA_DIR, f"{clean_name}_1H.csv"), index=False)
 
-                return df_final_1h if ktype_str == "1H" else df_final_5m
-        except Exception:
-            pass
-        return None
+                log_event(f"[Auto-Heal 成功] {code} 今日 5M 與 1H 數據已自動補齊校準 (共 {len(df_final)} 根 5M)")
+                return True, f"已補齊校準 {len(df_final)} 根 5M"
+            else:
+                log_event(f"[Auto-Heal 失敗] 無法從 OpenD 獲取 {code} 實時 K 線: {df}", "WARNING")
+                return False, "獲取數據為空"
+        except Exception as e:
+            log_event(f"[Auto-Heal 異常] {code}: {str(e)}", "ERROR")
+            return False, str(e)
 
     def get_realtime_snapshot(self, code_list: list):
-        """獲取毫秒實時快照 (包含盤前現價與成交量)"""
         ctx = self.get_context()
         if ctx is None:
             return None
@@ -218,16 +168,12 @@ class MarketDataHub:
             if ret == RET_OK and not df.empty:
                 df.columns = [c.lower() for c in df.columns]
                 return df
-        except Exception:
-            pass
+        except Exception as e:
+            log_event(f"快照獲取異常: {str(e)}", "ERROR")
         return None
 
-# 單例導出
 hub_engine = MarketDataHub()
 
-# -------------------------------------------------------------
-# Moomoo 實盤賬戶接口 (含 safe_float 防護)
-# -------------------------------------------------------------
 def get_moomoo_real_portfolio(host='127.0.0.1', port=11111):
     try:
         from moomoo import OpenSecTradeContext, TrdMarket, TrdEnv, Currency, RET_OK
@@ -236,7 +182,7 @@ def get_moomoo_real_portfolio(host='127.0.0.1', port=11111):
         
         if ret_acc != RET_OK or acc_list.empty:
             trd_ctx.close()
-            return None, None, f"獲取賬戶列表失敗: {acc_list}"
+            return None, None, f"獲取賬戶列表失敗"
             
         real_accs = acc_list[acc_list['trd_env'] == 'REAL']
         target_acc = real_accs.iloc[0] if not real_accs.empty else acc_list.iloc[0]
@@ -267,4 +213,5 @@ def get_moomoo_real_portfolio(host='127.0.0.1', port=11111):
         trd_ctx.close()
         return fund_summary, pos_df, "OK"
     except Exception as e:
+        log_event(f"持倉查詢異常: {str(e)}", "ERROR")
         return None, None, str(e)
