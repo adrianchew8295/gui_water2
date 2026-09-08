@@ -1,5 +1,5 @@
 # 文件名: macro_radar_plugin.py
-# 職責: 渲染 12 檔核心宏觀雷達純日線圖表 (300~500 根日 K 線 + 移除 Volume + 自動繪製 Trendline/Channel/Major Support/Wave HUD)
+# 職責: 渲染專業 Murphy 日線技術圖表 (300~500 根日 K 線 + 局部精準通道 + S/R 與 Major Support + 艾略特波浪 HUD)
 
 import os
 import json
@@ -7,7 +7,6 @@ import datetime
 import pandas as pd
 import streamlit as st
 import streamlit.components.v1 as components
-import pytz
 from data_engine import hub_engine
 from macro_radar_engine import compute_murphy_technicals
 
@@ -19,7 +18,7 @@ def render_murphy_daily_chart(code: str, bars_count: int = 300):
     csv_path = os.path.join(DATA_DIR, f"{clean_name}_DAY.csv")
 
     if not os.path.exists(csv_path):
-        st.warning(f"⚪ 正在載入 {code} 日線歷史數據...")
+        st.warning(f"⚪ 正在獲取 {code} 日線歷史數據...")
         return
 
     try:
@@ -32,12 +31,10 @@ def render_murphy_daily_chart(code: str, bars_count: int = 300):
         df['dt'] = pd.to_datetime(df['time_key'])
         df = df.sort_values('dt').tail(bars_count).copy()
 
-        # 執行 Murphy 幾何與波浪運算
         tech_res = compute_murphy_technicals(df)
 
         candles_data = []
         for _, row in df.iterrows():
-            # 轉換為標準日期文字 (YYYY-MM-DD)
             t_str = row['dt'].strftime('%Y-%m-%d')
             candles_data.append({
                 "time": t_str,
@@ -48,7 +45,7 @@ def render_murphy_daily_chart(code: str, bars_count: int = 300):
             })
 
         last_c = candles_data[-1] if candles_data else {}
-        trend_status_str = "🟢 上升趨勢" if tech_res.get('trend_type') == 'UPTREND' else ("🔴 下降趨勢" if tech_res.get('trend_type') == 'DOWNTREND' else "⚪ 箱體震盪")
+        trend_status_str = "🟢 上升通道" if tech_res.get('trend_type') == 'UPTREND' else ("🔴 下降通道" if tech_res.get('trend_type') == 'DOWNTREND' else "⚪ 區間箱體")
 
         html_code = f"""
         <!DOCTYPE html>
@@ -77,7 +74,7 @@ def render_murphy_daily_chart(code: str, bars_count: int = 300):
         <body>
             <div id="wrapper">
                 <div id="hud-panel">
-                    <b>📡 {code} · 純日線技術幾何畫布 (John J. Murphy 體系)</b><br/>
+                    <b>📡 {code} · 純日線技術幾何通道 (John J. Murphy 體系)</b><br/>
                     狀態: <b>{trend_status_str}</b> &nbsp;|&nbsp; <b>{tech_res.get('wave_label', '')}</b><br/>
                     現價: <b style="color:#38BDF8;">${last_c.get('close', 0.0):.2f}</b> &nbsp;|&nbsp; 
                     阻力 (Resistance): <b style="color:#FF5252;">${tech_res.get('immediate_resistance', 0.0):.2f}</b> &nbsp;|&nbsp; 
@@ -92,7 +89,7 @@ def render_murphy_daily_chart(code: str, bars_count: int = 300):
                     grid: {{ vertLines: {{ color: '#131B2E' }}, horzLines: {{ color: '#131B2E' }} }},
                     crosshair: {{ mode: LightweightCharts.CrosshairMode.Normal }},
                     rightPriceScale: {{ borderColor: '#1E293B', scaleMargins: {{ top: 0.1, bottom: 0.1 }} }},
-                    timeScale: {{ borderColor: '#1E293B', fixLeftEdge: false, rightOffset: 12 }}
+                    timeScale: {{ borderColor: '#1E293B', fixLeftEdge: false, rightOffset: 8 }}
                 }});
 
                 const candleSeries = chart.addCandlestickSeries({{
@@ -102,7 +99,7 @@ def render_murphy_daily_chart(code: str, bars_count: int = 300):
                 const rawCandles = {json.dumps(candles_data)};
                 candleSeries.setData(rawCandles);
 
-                // 1. 標註 Major Support (大級別重大支撐底線 - 粗青色線)
+                // 1. 標註 Major Support (粗青色底線)
                 const majorSup = {tech_res.get('major_support', 0.0)};
                 if (majorSup > 0) {{
                     candleSeries.createPriceLine({{
@@ -111,7 +108,7 @@ def render_murphy_daily_chart(code: str, bars_count: int = 300):
                     }});
                 }}
 
-                // 2. 標註即時 S/R 水平線
+                // 2. 標註 S/R 水平線
                 const immRes = {tech_res.get('immediate_resistance', 0.0)};
                 const immSup = {tech_res.get('immediate_support', 0.0)};
                 if (immRes > 0) {{
@@ -127,7 +124,7 @@ def render_murphy_daily_chart(code: str, bars_count: int = 300):
                     }});
                 }}
 
-                // 3. 繪製 Trendlines (基礎趨勢線)
+                // 3. 繪製局部段落趨勢線 (從起點連至最新，絕不貫穿全屏)
                 const tLines = {json.dumps(tech_res.get('trend_lines', []))};
                 tLines.forEach(line => {{
                     const lineSeries = chart.addLineSeries({{
@@ -135,12 +132,12 @@ def render_murphy_daily_chart(code: str, bars_count: int = 300):
                         crosshairMarkerVisible: false
                     }});
                     lineSeries.setData([
-                        {{ time: line.from_time.split(' ')[0], value: line.from_price }},
-                        {{ time: line.to_time.split(' ')[0], value: line.to_price }}
+                        {{ time: line.from_time, value: line.from_price }},
+                        {{ time: line.to_time, value: line.to_price }}
                     ]);
                 }});
 
-                // 4. 繪製 Trend Channels (平行通道線)
+                // 4. 繪製精準平行通道軌道線
                 const cLines = {json.dumps(tech_res.get('channel_lines', []))};
                 cLines.forEach(line => {{
                     const channelSeries = chart.addLineSeries({{
@@ -148,8 +145,8 @@ def render_murphy_daily_chart(code: str, bars_count: int = 300):
                         crosshairMarkerVisible: false
                     }});
                     channelSeries.setData([
-                        {{ time: line.from_time.split(' ')[0], value: line.from_price }},
-                        {{ time: line.to_time.split(' ')[0], value: line.to_price }}
+                        {{ time: line.from_time, value: line.from_price }},
+                        {{ time: line.to_time, value: line.to_price }}
                     ]);
                 }});
 
@@ -173,5 +170,4 @@ def render_macro_radar_view(assets):
     with col2:
         bars_count = st.slider("📅 歷史日 K 深度", min_value=100, max_value=500, value=300, step=50, key="macro_radar_bars_slider")
 
-    # 渲染純日線圖
     render_murphy_daily_chart(sel_code, bars_count=bars_count)
