@@ -1,5 +1,5 @@
 # 文件名: chart_view_plugin.py
-# 職責: 渲染專業 TradingView 圖表 (無縫時間軸 + 盤前盤後遮罩 + 懸浮 OHLC 抬頭 + 完整攻防水平線)
+# 職責: 渲染富途牛牛風格圖表 (對齊 MYT 大馬時間 + 全景 Trading Info 懸浮窗 + 最高最低價 High/Low 標註 + 攻防線)
 
 import os
 import datetime
@@ -59,11 +59,15 @@ def render_lightweight_tv_chart(code: str, ktype_str: str = "5M", bars_count: in
             return
 
         df['dt'] = pd.to_datetime(df['time_key'])
-        # 提取指定顯示柱數（保證圖形比例健康）
         df = df.sort_values('dt').tail(bars_count).copy()
 
         candles_data = []
         volume_data = []
+
+        window_high = -999999.0
+        window_low = 999999.0
+        high_bar_time = None
+        low_bar_time = None
 
         for _, row in df.iterrows():
             ts = int(row['dt'].replace(tzinfo=pytz.UTC).timestamp())
@@ -73,11 +77,22 @@ def render_lightweight_tv_chart(code: str, ktype_str: str = "5M", bars_count: in
             c = float(row.get('close', 0.0))
             v = float(row.get('volume', 0.0))
 
+            if h > window_high:
+                window_high = h
+                high_bar_time = ts
+            if l < window_low and l > 0:
+                window_low = l
+                low_bar_time = ts
+
+            # 轉換為大馬時間文字
+            dt_myt = row['dt'].tz_localize(tz_ny).tz_convert('Asia/Kuala_Lumpur')
+            time_str_myt = dt_myt.strftime('%Y-%m-%d %H:%M')
+
             t_ny = row['dt'].time()
             is_ext = (datetime.time(4, 0) <= t_ny < datetime.time(9, 30)) or (datetime.time(16, 0) <= t_ny <= datetime.time(20, 0))
             session_label = "🟡 盤前 (PM)" if datetime.time(4, 0) <= t_ny < datetime.time(9, 30) else ("🔵 盤後 (AH)" if datetime.time(16, 0) <= t_ny <= datetime.time(20, 0) else "🟢 常規盤 (RTH)")
 
-            time_str = row['dt'].strftime('%Y-%m-%d %H:%M')
+            chg_pct = ((c - o) / o * 100.0) if o > 0 else 0.0
 
             candles_data.append({
                 "time": ts,
@@ -85,7 +100,9 @@ def render_lightweight_tv_chart(code: str, ktype_str: str = "5M", bars_count: in
                 "high": h,
                 "low": l,
                 "close": c,
-                "time_str": time_str,
+                "volume": v,
+                "chg_pct": chg_pct,
+                "time_str_myt": time_str_myt,
                 "session_label": session_label,
                 "is_ext": is_ext
             })
@@ -114,11 +131,11 @@ def render_lightweight_tv_chart(code: str, ktype_str: str = "5M", bars_count: in
                     overflow: hidden;
                 }}
                 #wrapper {{ position: relative; width: 100%; height: 560px; }}
-                #legend {{
+                #trading-info {{
                     position: absolute; top: 8px; left: 12px; z-index: 10;
-                    font-size: 13px; font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
-                    background: rgba(15, 23, 42, 0.88); padding: 6px 12px; border-radius: 6px;
-                    border: 1px solid #1E293B; pointer-events: none;
+                    font-size: 12.5px; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+                    background: rgba(15, 23, 42, 0.90); padding: 6px 14px; border-radius: 6px;
+                    border: 1px solid #1E293B; pointer-events: none; line-height: 1.5;
                 }}
                 #shading-canvas {{ position: absolute; top: 0; left: 0; width: 100%; height: 560px; pointer-events: none; z-index: 1; }}
                 #chart-container {{ position: absolute; top: 0; left: 0; width: 100%; height: 560px; z-index: 2; }}
@@ -126,13 +143,13 @@ def render_lightweight_tv_chart(code: str, ktype_str: str = "5M", bars_count: in
         </head>
         <body>
             <div id="wrapper">
-                <div id="legend">📅 懸停查看具體 K 線時序與 OHLC</div>
+                <div id="trading-info">📅 懸停查看具體 K 線 Trading Info 與 OHLC (MYT)</div>
                 <canvas id="shading-canvas"></canvas>
                 <div id="chart-container"></div>
             </div>
             <script>
                 const container = document.getElementById('chart-container');
-                const legend = document.getElementById('legend');
+                const tradingInfo = document.getElementById('trading-info');
                 const canvas = document.getElementById('shading-canvas');
                 const ctx = canvas.getContext('2d');
 
@@ -142,6 +159,7 @@ def render_lightweight_tv_chart(code: str, ktype_str: str = "5M", bars_count: in
                 }}
                 resizeCanvas();
 
+                // 核心：時間軸對齊馬來西亞時間 (MYT = UTC+8)
                 const chart = LightweightCharts.createChart(container, {{
                     layout: {{ background: {{ color: 'transparent' }}, textColor: '#94A3B8' }},
                     grid: {{ vertLines: {{ color: '#131B2E' }}, horzLines: {{ color: '#131B2E' }} }},
@@ -152,7 +170,7 @@ def render_lightweight_tv_chart(code: str, ktype_str: str = "5M", bars_count: in
                         timeVisible: true,
                         secondsVisible: false,
                         tickMarkFormatter: (time, tickMarkType, locale) => {{
-                            const d = new Date(time * 1000);
+                            const d = new Date((time + 8 * 3600) * 1000);
                             const pad = (n) => String(n).padStart(2, '0');
                             const m = pad(d.getUTCMonth() + 1);
                             const day = pad(d.getUTCDate());
@@ -163,9 +181,9 @@ def render_lightweight_tv_chart(code: str, ktype_str: str = "5M", bars_count: in
                     }},
                     localization: {{
                         timeFormatter: (ts) => {{
-                            const d = new Date(ts * 1000);
+                            const d = new Date((ts + 8 * 3600) * 1000);
                             const pad = (n) => String(n).padStart(2, '0');
-                            return `${{d.getUTCFullYear()}}-${{pad(d.getUTCMonth()+1)}}-${{pad(d.getUTCDate())}} ${{pad(d.getUTCHours())}}:${{pad(d.getUTCMinutes())}} ET`;
+                            return `${{d.getUTCFullYear()}}-${{pad(d.getUTCMonth()+1)}}-${{pad(d.getUTCDate())}} ${{pad(d.getUTCHours())}}:${{pad(d.getUTCMinutes())}} MYT`;
                         }}
                     }}
                 }});
@@ -183,33 +201,76 @@ def render_lightweight_tv_chart(code: str, ktype_str: str = "5M", bars_count: in
                 const rawVolumes = {json.dumps(volume_data)};
                 volumeSeries.setData(rawVolumes);
 
-                // 水平攻防線
+                // 標註當前視圖中的最高價 (High) 與 最低價 (Low)
+                const winHigh = {window_high};
+                const winLow = {window_low};
+                if (winHigh > 0) {{
+                    candleSeries.createPriceLine({{
+                        price: winHigh,
+                        color: '#F43F5E',
+                        lineWidth: 1,
+                        lineStyle: LightweightCharts.LineStyle.Dotted,
+                        axisLabelVisible: true,
+                        title: `HIGH: ${{winHigh.toFixed(2)}}`
+                    }});
+                }}
+                if (winLow < 999999 && winLow > 0) {{
+                    candleSeries.createPriceLine({{
+                        price: winLow,
+                        color: '#10B981',
+                        lineWidth: 1,
+                        lineStyle: LightweightCharts.LineStyle.Dotted,
+                        axisLabelVisible: true,
+                        title: `LOW: ${{winLow.toFixed(2)}}`
+                    }});
+                }}
+
+                // 攻防線
                 const pmh = {metrics['pmh']}; const pml = {metrics['pml']};
                 const pdh = {metrics['pdh']}; const pdl = {metrics['pdl']};
                 const ema = {metrics['ema20_1h']};
 
-                if (pmh > 0) candleSeries.createPriceLine({{ price: pmh, color: '#FACC15', lineWidth: 1, lineStyle: LightweightCharts.LineStyle.Dashed, axisLabelVisible: true, title: 'PMH (盤前高)' }});
-                if (pml > 0) candleSeries.createPriceLine({{ price: pml, color: '#FACC15', lineWidth: 1, lineStyle: LightweightCharts.LineStyle.Dashed, axisLabelVisible: true, title: 'PML (盤前低)' }});
-                if (pdh > 0) candleSeries.createPriceLine({{ price: pdh, color: '#FF5252', lineWidth: 1, lineStyle: LightweightCharts.LineStyle.Solid, axisLabelVisible: true, title: 'PDH (昨高)' }});
-                if (pdl > 0) candleSeries.createPriceLine({{ price: pdl, color: '#00E676', lineWidth: 1, lineStyle: LightweightCharts.LineStyle.Solid, axisLabelVisible: true, title: 'PDL (昨低)' }});
+                if (pmh > 0) candleSeries.createPriceLine({{ price: pmh, color: '#FACC15', lineWidth: 1, lineStyle: LightweightCharts.LineStyle.Dashed, axisLabelVisible: true, title: 'PMH' }});
+                if (pml > 0) candleSeries.createPriceLine({{ price: pml, color: '#FACC15', lineWidth: 1, lineStyle: LightweightCharts.LineStyle.Dashed, axisLabelVisible: true, title: 'PML' }});
+                if (pdh > 0) candleSeries.createPriceLine({{ price: pdh, color: '#FF5252', lineWidth: 1, lineStyle: LightweightCharts.LineStyle.Solid, axisLabelVisible: true, title: 'PDH' }});
+                if (pdl > 0) candleSeries.createPriceLine({{ price: pdl, color: '#00E676', lineWidth: 1, lineStyle: LightweightCharts.LineStyle.Solid, axisLabelVisible: true, title: 'PDL' }});
                 if (ema > 0) candleSeries.createPriceLine({{ price: ema, color: '#38BDF8', lineWidth: 1, lineStyle: LightweightCharts.LineStyle.Dotted, axisLabelVisible: true, title: '1H EMA20' }});
 
                 const candleMap = {{}};
                 rawCandles.forEach(c => {{ candleMap[c.time] = c; }});
 
+                function updateHUD(meta, data) {{
+                    const color = data.close >= data.open ? '#00E676' : '#FF5252';
+                    const chgStr = meta.chg_pct >= 0 ? `+${{meta.chg_pct.toFixed(2)}}%` : `${{meta.chg_pct.toFixed(2)}}%`;
+                    const volStr = Number(meta.volume || 0).toLocaleString();
+                    tradingInfo.innerHTML = `
+                        <b>📅 ${{meta.time_str_myt}} MYT</b> &nbsp;|&nbsp; <b>${{meta.session_label}}</b><br/>
+                        開: <b>$${{data.open.toFixed(2)}}</b> &nbsp;
+                        高: <b style="color:#F43F5E;">$${{data.high.toFixed(2)}}</b> &nbsp;
+                        低: <b style="color:#10B981;">$${{data.low.toFixed(2)}}</b> &nbsp;
+                        收: <b style="color:${{color}};">$${{data.close.toFixed(2)}}</b> (${{chgStr}}) &nbsp;|&nbsp;
+                        量: <b>${{volStr}}</b>
+                    `;
+                }}
+
+                // 初始載入顯示最後一根
+                if (rawCandles.length > 0) {{
+                    const last = rawCandles[rawCandles.length - 1];
+                    updateHUD(last, last);
+                }}
+
+                // 十字光標移動時動態切換 Trading Info
                 chart.subscribeCrosshairMove(param => {{
                     if (!param.time || !param.seriesData.get(candleSeries)) {{
-                        const last = rawCandles[rawCandles.length - 1];
-                        if (last) {{
-                            const color = last.close >= last.open ? '#00E676' : '#FF5252';
-                            legend.innerHTML = `<b>${{last.time_str}} ET</b> &nbsp;|&nbsp; <b>${{last.session_label}}</b> &nbsp;|&nbsp; 開: <b>$${{last.open.toFixed(2)}}</b> &nbsp; 高: <b>$${{last.high.toFixed(2)}}</b> &nbsp; 低: <b>$${{last.low.toFixed(2)}}</b> &nbsp; 收: <b style="color:${{color}}">$${{last.close.toFixed(2)}}</b>`;
+                        if (rawCandles.length > 0) {{
+                            const last = rawCandles[rawCandles.length - 1];
+                            updateHUD(last, last);
                         }}
                         return;
                     }}
                     const data = param.seriesData.get(candleSeries);
                     const meta = candleMap[param.time] || {{}};
-                    const color = data.close >= data.open ? '#00E676' : '#FF5252';
-                    legend.innerHTML = `<b>${{meta.time_str || ''}} ET</b> &nbsp;|&nbsp; <b>${{meta.session_label || ''}}</b> &nbsp;|&nbsp; 開: <b>$${{data.open.toFixed(2)}}</b> &nbsp; 高: <b>$${{data.high.toFixed(2)}}</b> &nbsp; 低: <b>$${{data.low.toFixed(2)}}</b> &nbsp; 收: <b style="color:${{color}}">$${{data.close.toFixed(2)}}</b>`;
+                    updateHUD(meta, data);
                 }});
 
                 function drawExtendedShading() {{
@@ -252,15 +313,3 @@ def render_lightweight_tv_chart(code: str, ktype_str: str = "5M", bars_count: in
         components.html(html_code, height=580, scrolling=False)
     except Exception as e:
         st.error(f"❌ 圖表渲染異常: {str(e)}")
-
-def render_chart_view(assets):
-    code_list = [a['code'] for a in assets]
-    c1, c2, c3 = st.columns([3, 2, 2])
-    with c1:
-        sel_code = st.selectbox("選擇穿透標的", code_list, index=0, key="chart_plugin_code_sel")
-    with c2:
-        sel_ktype = st.selectbox("選擇週期", ["5M", "1H", "DAY"], index=0, key="chart_plugin_ktype_sel")
-    with c3:
-        sel_bars = st.slider("顯示柱數", 30, 300, 120, step=10, key="chart_plugin_bars_sel")
-
-    render_lightweight_tv_chart(sel_code, sel_ktype, sel_bars)
