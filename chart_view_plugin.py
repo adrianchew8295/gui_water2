@@ -1,5 +1,5 @@
 # 文件名: chart_view_plugin.py
-# 职责: 渲染 TradingView 风格图表 (含 Extended Hours 盘前盘后暗色遮罩 + 完整日期时间轴 + PMH/PML 水平线)
+# 职责: 渲染 TradingView 风格图表 (含 Extended Hours 盘前盘后暗色遮罩绘制 + 完整日期时间格式化 + 攻防线)
 
 import os
 import datetime
@@ -15,7 +15,6 @@ tz_ny = pytz.timezone("America/New_York")
 DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "market_data")
 
 def check_and_auto_heal(code: str):
-    """探测本地 5M CSV 是否存在时间缺口并静默自愈"""
     clean_name = code.replace(".", "_")
     csv_5m = os.path.join(DATA_DIR, f"{clean_name}_5M.csv")
     session_id, _, now_ny = get_active_session_info()
@@ -44,7 +43,6 @@ def check_and_auto_heal(code: str):
         hub_engine.auto_heal_today_data(code)
 
 def render_lightweight_tv_chart(code: str, ktype_str: str = "5M", bars_count: int = 120):
-    """渲染 TradingView 风格图表"""
     check_and_auto_heal(code)
 
     clean_name = code.replace(".", "_")
@@ -66,10 +64,6 @@ def render_lightweight_tv_chart(code: str, ktype_str: str = "5M", bars_count: in
 
         candles_data = []
         volume_data = []
-        extended_areas = []  # 记录盘前盘后的起止区间
-
-        in_ext = False
-        ext_start = None
 
         for _, row in df.iterrows():
             ts = int(row['dt'].replace(tzinfo=pytz.UTC).timestamp())
@@ -80,36 +74,28 @@ def render_lightweight_tv_chart(code: str, ktype_str: str = "5M", bars_count: in
             v = float(row.get('volume', 0.0))
 
             t_ny = row['dt'].time()
-            # 美东 04:00~09:30 为 Premarket，16:00~20:00 为 Aftermarket
-            is_extended = (datetime.time(4, 0) <= t_ny < datetime.time(9, 30)) or (datetime.time(16, 0) <= t_ny <= datetime.time(20, 0))
+            is_ext = (datetime.time(4, 0) <= t_ny < datetime.time(9, 30)) or (datetime.time(16, 0) <= t_ny <= datetime.time(20, 0))
 
             candles_data.append({
                 "time": ts,
                 "open": o,
                 "high": h,
                 "low": l,
-                "close": c
+                "close": c,
+                "is_ext": is_ext
             })
 
-            vol_color = "rgba(0, 230, 118, 0.55)" if c >= o else "rgba(255, 82, 82, 0.55)"
+            # 盘前盘后量能柱颜色稍暗区分，常规盘明亮
+            if is_ext:
+                vol_color = "rgba(0, 200, 100, 0.25)" if c >= o else "rgba(220, 50, 50, 0.25)"
+            else:
+                vol_color = "rgba(0, 230, 118, 0.6)" if c >= o else "rgba(255, 82, 82, 0.6)"
+
             volume_data.append({
                 "time": ts,
                 "value": v,
                 "color": vol_color
             })
-
-            # 计算 Extended Hours 区域范围
-            if is_extended:
-                if not in_ext:
-                    in_ext = True
-                    ext_start = ts
-            else:
-                if in_ext:
-                    extended_areas.append({"from": ext_start, "to": ts})
-                    in_ext = False
-
-        if in_ext and ext_start is not None and candles_data:
-            extended_areas.append({"from": ext_start, "to": candles_data[-1]['time']})
 
         metrics = compute_radar_metrics(code, live_price=candles_data[-1]['close'] if candles_data else 0.0)
 
@@ -120,26 +106,58 @@ def render_lightweight_tv_chart(code: str, ktype_str: str = "5M", bars_count: in
             <meta charset="utf-8" />
             <script src="https://unpkg.com/lightweight-charts@4.1.1/dist/lightweight-charts.standalone.production.js"></script>
             <style>
+                * {{ box-sizing: border-box; }}
                 body {{
                     margin: 0;
                     padding: 0;
                     background-color: #06090E;
                     color: #CBD5E1;
                     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+                    overflow: hidden;
                 }}
-                #chart-container {{
+                #wrapper {{
+                    position: relative;
                     width: 100%;
                     height: 540px;
+                }}
+                #shading-canvas {{
+                    position: absolute;
+                    top: 0;
+                    left: 0;
+                    width: 100%;
+                    height: 540px;
+                    pointer-events: none;
+                    z-index: 1;
+                }}
+                #chart-container {{
+                    position: absolute;
+                    top: 0;
+                    left: 0;
+                    width: 100%;
+                    height: 540px;
+                    z-index: 2;
                 }}
             </style>
         </head>
         <body>
-            <div id="chart-container"></div>
+            <div id="wrapper">
+                <canvas id="shading-canvas"></canvas>
+                <div id="chart-container"></div>
+            </div>
             <script>
                 const container = document.getElementById('chart-container');
+                const canvas = document.getElementById('shading-canvas');
+                const ctx = canvas.getContext('2d');
+
+                function resizeCanvas() {{
+                    canvas.width = container.clientWidth;
+                    canvas.height = container.clientHeight;
+                }}
+                resizeCanvas();
+
                 const chart = LightweightCharts.createChart(container, {{
                     layout: {{
-                        background: {{ color: '#06090E' }},
+                        background: {{ color: 'transparent' }},
                         textColor: '#94A3B8',
                     }},
                     grid: {{
@@ -161,9 +179,15 @@ def render_lightweight_tv_chart(code: str, ktype_str: str = "5M", bars_count: in
                         timeVisible: true,
                         secondsVisible: false,
                     }},
+                    localization: {{
+                        timeFormatter: (ts) => {{
+                            const d = new Date(ts * 1000);
+                            const pad = (n) => String(n).padStart(2, '0');
+                            return `${{d.getUTCFullYear()}}-${{pad(d.getUTCMonth()+1)}}-${{pad(d.getUTCDate())}} ${{pad(d.getUTCHours())}}:${{pad(d.getUTCMinutes())}}`;
+                        }}
+                    }}
                 }});
 
-                // 1. K 线主图
                 const candleSeries = chart.addCandlestickSeries({{
                     upColor: '#00E676',
                     downColor: '#FF5252',
@@ -171,10 +195,9 @@ def render_lightweight_tv_chart(code: str, ktype_str: str = "5M", bars_count: in
                     wickUpColor: '#00E676',
                     wickDownColor: '#FF5252',
                 }});
-                const candleData = {json.dumps(candles_data)};
-                candleSeries.setData(candleData);
+                const rawCandles = {json.dumps(candles_data)};
+                candleSeries.setData(rawCandles);
 
-                // 2. 独立成交量副图 (附带日期刻度)
                 const volumeSeries = chart.addHistogramSeries({{
                     priceFormat: {{ type: 'volume' }},
                     priceScaleId: '',
@@ -183,68 +206,63 @@ def render_lightweight_tv_chart(code: str, ktype_str: str = "5M", bars_count: in
                         bottom: 0,
                     }},
                 }});
-                const volData = {json.dumps(volume_data)};
-                volumeSeries.setData(volData);
+                const rawVolumes = {json.dumps(volume_data)};
+                volumeSeries.setData(rawVolumes);
 
-                // 3. 攻防水平线
+                // 攻防线
                 const pmh = {metrics['pmh']};
                 const pml = {metrics['pml']};
                 const pdh = {metrics['pdh']};
                 const pdl = {metrics['pdl']};
                 const ema = {metrics['ema20_1h']};
 
-                if (pmh > 0) {{
-                    candleSeries.createPriceLine({{
-                        price: pmh,
-                        color: '#FACC15',
-                        lineWidth: 1,
-                        lineStyle: LightweightCharts.LineStyle.Dashed,
-                        axisLabelVisible: true,
-                        title: 'PMH (盘前高)',
-                    }});
-                }}
-                if (pml > 0) {{
-                    candleSeries.createPriceLine({{
-                        price: pml,
-                        color: '#FACC15',
-                        lineWidth: 1,
-                        lineStyle: LightweightCharts.LineStyle.Dashed,
-                        axisLabelVisible: true,
-                        title: 'PML (盘前低)',
-                    }});
-                }}
-                if (pdh > 0) {{
-                    candleSeries.createPriceLine({{
-                        price: pdh,
-                        color: '#FF5252',
-                        lineWidth: 1,
-                        lineStyle: LightweightCharts.LineStyle.Solid,
-                        axisLabelVisible: true,
-                        title: 'PDH (昨高)',
-                    }});
-                }}
-                if (pdl > 0) {{
-                    candleSeries.createPriceLine({{
-                        price: pdl,
-                        color: '#00E676',
-                        lineWidth: 1,
-                        lineStyle: LightweightCharts.LineStyle.Solid,
-                        axisLabelVisible: true,
-                        title: 'PDL (昨低)',
-                    }});
-                }}
-                if (ema > 0) {{
-                    candleSeries.createPriceLine({{
-                        price: ema,
-                        color: '#38BDF8',
-                        lineWidth: 1,
-                        lineStyle: LightweightCharts.LineStyle.Dotted,
-                        axisLabelVisible: true,
-                        title: '1H EMA20',
-                    }});
+                if (pmh > 0) candleSeries.createPriceLine({{ price: pmh, color: '#FACC15', lineWidth: 1, lineStyle: LightweightCharts.LineStyle.Dashed, axisLabelVisible: true, title: 'PMH (盘前高)' }});
+                if (pml > 0) candleSeries.createPriceLine({{ price: pml, color: '#FACC15', lineWidth: 1, lineStyle: LightweightCharts.LineStyle.Dashed, axisLabelVisible: true, title: 'PML (盘前低)' }});
+                if (pdh > 0) candleSeries.createPriceLine({{ price: pdh, color: '#FF5252', lineWidth: 1, lineStyle: LightweightCharts.LineStyle.Solid, axisLabelVisible: true, title: 'PDH (昨高)' }});
+                if (pdl > 0) candleSeries.createPriceLine({{ price: pdl, color: '#00E676', lineWidth: 1, lineStyle: LightweightCharts.LineStyle.Solid, axisLabelVisible: true, title: 'PDL (昨低)' }});
+                if (ema > 0) candleSeries.createPriceLine({{ price: ema, color: '#38BDF8', lineWidth: 1, lineStyle: LightweightCharts.LineStyle.Dotted, axisLabelVisible: true, title: '1H EMA20' }});
+
+                // 绘制 Extended Hours (盘前盘后) 专属半透明背景遮罩
+                function drawExtendedShading() {{
+                    resizeCanvas();
+                    ctx.clearRect(0, 0, canvas.width, canvas.height);
+                    const timeScale = chart.timeScale();
+                    
+                    let extStartIdx = null;
+                    for (let i = 0; i < rawCandles.length; i++) {{
+                        const c = rawCandles[i];
+                        if (c.is_ext) {{
+                            if (extStartIdx === null) extStartIdx = i;
+                        }} else {{
+                            if (extStartIdx !== null) {{
+                                fillShade(extStartIdx, i - 1);
+                                extStartIdx = null;
+                            }}
+                        }}
+                    }}
+                    if (extStartIdx !== null) {{
+                        fillShade(extStartIdx, rawCandles.length - 1);
+                    }}
+
+                    function fillShade(fromIdx, toIdx) {{
+                        const x1 = timeScale.timeToCoordinate(rawCandles[fromIdx].time);
+                        const x2 = timeScale.timeToCoordinate(rawCandles[toIdx].time);
+                        if (x1 !== null && x2 !== null) {{
+                            const startX = Math.min(x1, x2) - 3;
+                            const width = Math.abs(x2 - x1) + 6;
+                            ctx.fillStyle = 'rgba(255, 255, 255, 0.04)';
+                            ctx.fillRect(startX, 0, width, canvas.height - 30);
+                            ctx.fillStyle = 'rgba(148, 163, 184, 0.4)';
+                            ctx.font = '10px monospace';
+                            ctx.fillText('EXT HOURS', startX + 5, 18);
+                        }}
+                    }}
                 }}
 
                 chart.timeScale().fitContent();
+                setTimeout(drawExtendedShading, 100);
+                chart.timeScale().subscribeVisibleTimeRangeChange(drawExtendedShading);
+                window.addEventListener('resize', drawExtendedShading);
             </script>
         </body>
         </html>
