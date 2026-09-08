@@ -1,5 +1,5 @@
 # 文件名: data_engine.py
-# 职责: 完整抓取 04:00~20:00 美股全时段 5M 历史与实时数据 + 1H 本地重采样 + 持仓查询 + 状态日志
+# 職責: 分頁精準拉取 1,500 根全時段 5M 數據 + 獨立 1H/持倉查詢 + 系統日誌
 
 import os
 import time
@@ -62,26 +62,6 @@ def safe_float(val, default=0.0):
     except Exception:
         return default
 
-def resample_5m_to_1h(df_5m: pd.DataFrame) -> pd.DataFrame:
-    if df_5m is None or df_5m.empty:
-        return pd.DataFrame()
-    df = df_5m.copy()
-    df.columns = [c.lower().strip() for c in df.columns]
-    df['dt'] = pd.to_datetime(df['time_key'])
-    df = df.set_index('dt').sort_index()
-
-    agg_rules = {'open': 'first', 'high': 'max', 'low': 'min', 'close': 'last', 'volume': 'sum'}
-    if 'turnover' in df.columns:
-        agg_rules['turnover'] = 'sum'
-    if 'code' in df.columns:
-        agg_rules['code'] = 'first'
-        
-    df_1h = df.resample('1h', label='left', closed='left').agg(agg_rules)
-    df_1h = df_1h.dropna(subset=['open', 'close']).reset_index()
-    df_1h['time_key'] = df_1h['dt'].dt.strftime('%Y-%m-%d %H:%M:%S')
-    df_1h = df_1h.drop(columns=['dt'])
-    return df_1h
-
 class MarketDataHub:
     _instance = None
     quote_ctx = None
@@ -115,56 +95,103 @@ class MarketDataHub:
         with open(WATCHLIST_PATH, "w", encoding="utf-8") as f:
             json.dump({"assets": assets_list}, f, ensure_ascii=False, indent=2)
 
-    def auto_heal_today_data(self, code: str):
-        """拉取 04:00 至今包含盤前的全時段 5M 數據並重採樣 1H"""
+    def fetch_5m_deep_history(self, code: str = "US.QQQ", target_bars: int = 1500):
+        """【Step 1 核心】分頁循環拉取 1,500 根全時段原生 5M 柱"""
         ctx = self.get_context()
         if ctx is None:
             return False, "OpenD 離線"
 
         try:
-            from moomoo import KLType, AuType, RET_OK
+            from moomoo import KLType, AuType, SubType, RET_OK
             now_ny = datetime.datetime.now(tz_ny)
-            start_str = (now_ny - datetime.timedelta(days=7)).strftime("%Y-%m-%d")
             end_str = now_ny.strftime("%Y-%m-%d")
+            start_str = (now_ny - datetime.timedelta(days=60)).strftime("%Y-%m-%d")
 
-            ret, df_hist, msg = ctx.request_history_kline(
-                code=code,
-                start=start_str,
-                end=end_str,
-                ktype=KLType.K_5M,
-                autype=AuType.NONE,
-                max_count=1000,
-                extended_time=True
-            )
+            log_event(f"[*] 開始分頁拉取 {code} 5M 全時段歷史 (目標: {target_bars} 根)...")
 
-            if ret != RET_OK or df_hist.empty:
-                log_event(f"[Auto-Heal 失敗] 無法獲取 {code} 全時段數據: {msg}", "WARNING")
-                return False, f"獲取失敗: {msg}"
+            all_dfs = []
+            page_req_key = None
 
-            df_final = df_hist.copy()
-            df_final.columns = [c.lower().strip() for c in df_final.columns]
-            df_final = df_final.drop_duplicates(subset=['time_key']).sort_values('time_key').reset_index(drop=True)
+            while True:
+                ret, df_page, page_req_key = ctx.request_history_kline(
+                    code=code,
+                    start=start_str,
+                    end=end_str,
+                    ktype=KLType.K_5M,
+                    autype=AuType.NONE,
+                    max_count=1000,
+                    extended_time=True,
+                    page_req_key=page_req_key
+                )
+                if ret == RET_OK and not df_page.empty:
+                    all_dfs.append(df_page)
+                    total_downloaded = sum(len(d) for d in all_dfs)
+                    if total_downloaded >= target_bars or page_req_key is None:
+                        break
+                else:
+                    break
+                time.sleep(0.05)
+
+            ctx.subscribe([code], [SubType.K_5M])
+            ret_cur, df_cur = ctx.get_cur_kline(code, 200, KLType.K_5M, AuType.NONE)
+            if ret_cur == RET_OK and not df_cur.empty:
+                all_dfs.append(df_cur)
+
+            if not all_dfs:
+                return False, "未能獲取 5M 數據"
+
+            df_merged = pd.concat(all_dfs, ignore_index=True)
+            df_merged.columns = [c.lower().strip() for c in df_merged.columns]
+            df_final = df_merged.drop_duplicates(subset=['time_key']).sort_values('time_key').tail(target_bars).reset_index(drop=True)
 
             clean_name = code.replace(".", "_")
             csv_path_5m = os.path.join(DATA_DIR, f"{clean_name}_5M.csv")
             df_final.to_csv(csv_path_5m, index=False)
 
-            # 重採樣生成 1H
-            df_1h = resample_5m_to_1h(df_final)
-            if not df_1h.empty:
-                df_1h.to_csv(os.path.join(DATA_DIR, f"{clean_name}_1H.csv"), index=False)
-
-            log_event(f"[Auto-Heal 成功] {code} 全時段 5M 與 1H 已補齊落盤 (共 {len(df_final)} 根 5M)")
-            return True, f"已補齊全時段 {len(df_final)} 根 5M"
+            msg = f"已成功同步 {code} 5M 全時段數據: 共 {len(df_final)} 根"
+            log_event(msg)
+            return True, msg
 
         except Exception as e:
-            log_event(f"[Auto-Heal 異常] {code}: {str(e)}", "ERROR")
+            log_event(f"5M 深度拉取異常: {str(e)}", "ERROR")
+            return False, str(e)
+
+    def auto_heal_today_data(self, code: str):
+        clean_name = code.replace(".", "_")
+        csv_path_5m = os.path.join(DATA_DIR, f"{clean_name}_5M.csv")
+        if not os.path.exists(csv_path_5m) or os.path.getsize(csv_path_5m) < 1000:
+            return self.fetch_5m_deep_history(code, 1500)
+
+        ctx = self.get_context()
+        if ctx is None: return False, "OpenD 離線"
+        try:
+            from moomoo import KLType, AuType, SubType, RET_OK
+            now_ny = datetime.datetime.now(tz_ny)
+            start_str = (now_ny - datetime.timedelta(days=7)).strftime("%Y-%m-%d")
+            end_str = now_ny.strftime("%Y-%m-%d")
+
+            ret, df_hist, _ = ctx.request_history_kline(
+                code=code, start=start_str, end=end_str,
+                ktype=KLType.K_5M, autype=AuType.NONE, max_count=1000, extended_time=True
+            )
+            ctx.subscribe([code], [SubType.K_5M])
+            ret_cur, df_cur = ctx.get_cur_kline(code, 100, KLType.K_5M, AuType.NONE)
+
+            dfs = [pd.read_csv(csv_path_5m)]
+            if ret == RET_OK and not df_hist.empty: dfs.append(df_hist)
+            if ret_cur == RET_OK and not df_cur.empty: dfs.append(df_cur)
+
+            df_merged = pd.concat(dfs, ignore_index=True)
+            df_merged.columns = [c.lower().strip() for c in df_merged.columns]
+            df_final = df_merged.drop_duplicates(subset=['time_key']).sort_values('time_key').tail(1500).reset_index(drop=True)
+            df_final.to_csv(csv_path_5m, index=False)
+            return True, f"5M 自癒完成 (共 {len(df_final)} 根)"
+        except Exception as e:
             return False, str(e)
 
     def get_realtime_snapshot(self, code_list: list):
         ctx = self.get_context()
-        if ctx is None:
-            return None
+        if ctx is None: return None
         try:
             from moomoo import RET_OK
             ret, df = ctx.get_market_snapshot(code_list)
@@ -182,7 +209,6 @@ def get_moomoo_real_portfolio(host='127.0.0.1', port=11111):
         from moomoo import OpenSecTradeContext, TrdMarket, TrdEnv, Currency, RET_OK
         trd_ctx = OpenSecTradeContext(filter_trdmarket=TrdMarket.NONE, host=host, port=port)
         ret_acc, acc_list = trd_ctx.get_acc_list()
-        
         if ret_acc != RET_OK or acc_list.empty:
             trd_ctx.close()
             return None, None, "獲取賬戶列表失敗"
