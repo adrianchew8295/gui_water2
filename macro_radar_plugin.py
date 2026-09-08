@@ -14,30 +14,42 @@ from macro_radar_engine import compute_radar_channel_and_markdown
 tz_ny = pytz.timezone("America/New_York")
 
 def fetch_daily_kline_safe(code: str, bars: int = 300) -> pd.DataFrame:
-    """極速安全加載日線數據 (優先 OpenD -> 本地 CSV -> yfinance 備援)"""
-    # 1. 優先嘗試 OpenD
+    """極速安全加載日線數據 (由後往前抓取最新 300 根，修復歷史截斷 Bug)"""
+    # 1. 優先嘗試 OpenD 直連 (倒序抓取距離當下最新的 bars 根)
     try:
         from moomoo import OpenQuoteContext, RET_OK, KLType, AuType
         quote_ctx = OpenQuoteContext(host='127.0.0.1', port=11111)
-        today_dt = datetime.datetime.now(tz_ny).date()
-        start_str = (today_dt - datetime.timedelta(days=int(bars * 1.8))).strftime("%Y-%m-%d")
-        end_str = today_dt.strftime("%Y-%m-%d")
         
-        ret, df_k, _ = quote_ctx.request_history_kline(
+        # 核心修復：start 傳入空字串，end 設為當前時刻，OpenD 會倒序截取最新 300 根
+        now_ny = datetime.datetime.now(tz_ny)
+        end_str = now_ny.strftime("%Y-%m-%d %H:%M:%S")
+        
+        ret, df_k, msg = quote_ctx.request_history_kline(
             code=code,
-            start=start_str,
+            start='',  # 留空以確保由 end 倒序往回抓取最新 K 線
             end=end_str,
             ktype=KLType.K_DAY,
             autype=AuType.QFQ,
             max_count=bars
         )
         quote_ctx.close()
+        
         if ret == RET_OK and df_k is not None and not df_k.empty:
             df = df_k.copy()
             df.columns = [c.lower().strip() for c in df.columns]
             time_col = 'time_key' if 'time_key' in df.columns else df.columns[0]
             df['time_clean'] = df[time_col].astype(str).str.slice(0, 10)
-            return df[['time_clean', 'open', 'high', 'low', 'close', 'volume']].drop_duplicates('time_clean').sort_values('time_clean').reset_index(drop=True)
+            df = df[['time_clean', 'open', 'high', 'low', 'close', 'volume']].drop_duplicates('time_clean').sort_values('time_clean').tail(bars).reset_index(drop=True)
+            
+            # 自動沉澱至本地 market_data，供離線時使用
+            try:
+                os.makedirs("./market_data", exist_ok=True)
+                clean_code = code.replace('.', '_')
+                df.to_csv(f"./market_data/{clean_code}_DAY.csv", index=False)
+            except Exception:
+                pass
+                
+            return df
     except Exception:
         pass
 
@@ -60,7 +72,7 @@ def fetch_daily_kline_safe(code: str, bars: int = 300) -> pd.DataFrame:
             except Exception:
                 pass
 
-    # 3. 備用：yfinance 拉取
+    # 3. 備用：yfinance 網絡拉取最新 2 年日線
     try:
         import yfinance as yf
         sym = code.replace("US.", "").replace("CC.", "").replace("HK.", "")
