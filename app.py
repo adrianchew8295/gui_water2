@@ -1,10 +1,13 @@
 # 文件名: app.py
-# 职责: 侧边栏主导航 (QQQ 置顶) + 右侧多子 Tab 容器装载
+# 职责: 侧边栏主导航 (QQQ 置顶) + 5 大主功能模块完整装配
 
 import streamlit as st
 from data_engine import hub_engine
 import chart_view_plugin
 from portfolio_manager_plugin import render_portfolio_securities, render_portfolio_analysis
+from macro_radar_plugin import render_macro_radar_view
+from ai_audit_plugin import render_ai_audit_view
+from radar_engine import compute_radar_metrics
 
 st.set_page_config(
     page_title="GUI Water Terminal",
@@ -47,11 +50,23 @@ if main_choice == "👑 1. US.QQQ 纳指中枢":
         
     with sub_tab2:
         st.markdown("### 🧭 QQQ 攻防阶梯与宏观状态")
-        st.info("💡 阶梯战区计算模块将于 Step 3 挂载（PDH/PDL、1H EMA20 动态通道）。")
+        snap = hub_engine.get_realtime_snapshot(["US.QQQ"])
+        cur_p = float(snap.iloc[0].get('last_price', 0.0)) if (snap is not None and not snap.empty) else 0.0
+        m = compute_radar_metrics("US.QQQ", live_price=cur_p)
+        
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("⚡ QQQ 现价", f"${cur_p:,.2f}" if cur_p > 0 else "--")
+        c2.metric("🔵 1H EMA20 均线", f"${m['ema20_1h']:,.2f}" if m['ema20_1h'] > 0 else "--")
+        c3.metric("昨日最高 (PDH)", f"${m['pdh']:,.2f}" if m['pdh'] > 0 else "--")
+        c4.metric("昨日最低 (PDL)", f"${m['pdl']:,.2f}" if m['pdl'] > 0 else "--")
+        
+        st.markdown("---")
+        st.markdown(f"**Trend Bias 定调**: `{m['trend_bias']}` | **当前指令**: `{m['action_hint']}`")
+        st.markdown(f"• **今日买入地板 (RBS / PDL)**: `{m['floor_zone']}`")
+        st.markdown(f"• **向上突破阻力 (SBR / PDH)**: `{m['ceiling_zone']}`")
         
     with sub_tab3:
-        st.markdown("### 📰 宏观动态与 AI 诊断反馈")
-        st.info("💡 AI 审计 Prompt 生成器将于 Step 4 接入。")
+        render_ai_audit_view()
 
 # -------------------------------------------------------------
 # MAIN 2: 个人实操持仓 (Portfolio)
@@ -71,11 +86,11 @@ elif main_choice == "💼 2. 我的实操持仓 (Portfolio)":
 # -------------------------------------------------------------
 elif main_choice == "📡 3. 12档核心宏观雷达":
     st.markdown("## 📡 12档核心宏观雷达与战区")
-    from macro_radar_plugin import render_macro_radar_view
     render_macro_radar_view(assets)
+
 # -------------------------------------------------------------
-# MAIN 4 & 5: 预留模块
+# MAIN 4 & 5: 预留拓展模块
 # -------------------------------------------------------------
 else:
     st.markdown(f"## {main_choice}")
-    st.info("模块构建中...")
+    st.info("模块持续迭代中...")
