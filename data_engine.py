@@ -1,7 +1,8 @@
 # 文件名: data_engine.py
-# 職責: 完整抓取 04:00~20:00 美股盤前/常規/盤後全時段 5M 數據 + 自動合成 1H + 雙軌日誌
+# 職責: 全時段 5M 歷史落盤 + 自動自癒補齊 (Auto-Heal) + 1H 重採樣 + 實盤持倉查詢 + 雙軌日誌
 
 import os
+import time
 import datetime
 import json
 import logging
@@ -15,6 +16,7 @@ WATCHLIST_PATH = os.path.join(BASE_DIR, "watchlist.json")
 LOG_PATH = os.path.join(BASE_DIR, "system_health.log")
 os.makedirs(DATA_DIR, exist_ok=True)
 
+# 配置系統日誌
 logging.basicConfig(
     filename=LOG_PATH,
     level=logging.INFO,
@@ -32,6 +34,7 @@ def log_event(msg: str, level: str = "INFO"):
         logging.info(msg)
 
 def get_active_session_info():
+    """判定當前美東時段狀態"""
     now_ny = datetime.datetime.now(tz_ny)
     weekday = now_ny.weekday()
     cur_t = now_ny.time()
@@ -62,6 +65,7 @@ def safe_float(val, default=0.0):
         return default
 
 def resample_5m_to_1h(df_5m: pd.DataFrame) -> pd.DataFrame:
+    """5M 自動聚合為 1H"""
     if df_5m is None or df_5m.empty:
         return pd.DataFrame()
     df = df_5m.copy()
@@ -126,8 +130,14 @@ class MarketDataHub:
             start_str = (now_ny - datetime.timedelta(days=7)).strftime("%Y-%m-%d")
             end_str = now_ny.strftime("%Y-%m-%d")
 
-            # 1. 優先使用 request_history_kline 獲取包含盤前全時段的連續 5M
-            ret, df_hist, msg = ctx.request_history_kline(
+            # 1. 訂閱 5M 實時流
+            ctx.subscribe([code], [SubType.K_5M])
+
+            # 2. 獲取最近 500 根 5M (覆蓋過去數天全時段盤前盤後)
+            ret_cur, df_cur = ctx.get_cur_kline(code, 500, KLType.K_5M, AuType.NONE)
+
+            # 3. 獲取歷史連續 5M
+            ret_hist, df_hist, _ = ctx.request_history_kline(
                 code=code,
                 start=start_str,
                 end=end_str,
@@ -136,18 +146,14 @@ class MarketDataHub:
                 max_count=1000
             )
 
-            # 2. 訂閱並獲取最新走動柱
-            ctx.subscribe([code], [SubType.K_5M])
-            ret_cur, df_cur = ctx.get_cur_kline(code, 100, KLType.K_5M, AuType.NONE)
-
             dfs_to_merge = []
-            if ret == RET_OK and not df_hist.empty:
+            if ret_hist == RET_OK and not df_hist.empty:
                 dfs_to_merge.append(df_hist)
             if ret_cur == RET_OK and not df_cur.empty:
                 dfs_to_merge.append(df_cur)
 
             if not dfs_to_merge:
-                log_event(f"[Auto-Heal 失敗] 無法獲取 {code} 全時段數據: {msg}", "WARNING")
+                log_event(f"[Auto-Heal 失敗] 無法獲取 {code} 全時段數據", "WARNING")
                 return False, "數據為空"
 
             df_all = pd.concat(dfs_to_merge, ignore_index=True)
@@ -163,7 +169,7 @@ class MarketDataHub:
             if not df_1h.empty:
                 df_1h.to_csv(os.path.join(DATA_DIR, f"{clean_name}_1H.csv"), index=False)
 
-            log_event(f"[Auto-Heal 成功] {code} 盤前全時段 5M 與 1H 已補齊落盤 (共 {len(df_final)} 根 5M)")
+            log_event(f"[Auto-Heal 成功] {code} 全時段 5M 與 1H 已補齊落盤 (共 {len(df_final)} 根 5M)")
             return True, f"已補齊全時段 {len(df_final)} 根 5M"
 
         except Exception as e:
@@ -185,3 +191,46 @@ class MarketDataHub:
         return None
 
 hub_engine = MarketDataHub()
+
+def get_moomoo_real_portfolio(host='127.0.0.1', port=11111):
+    """查詢真實賬戶資金與持倉"""
+    try:
+        from moomoo import OpenSecTradeContext, TrdMarket, TrdEnv, Currency, RET_OK
+        trd_ctx = OpenSecTradeContext(filter_trdmarket=TrdMarket.NONE, host=host, port=port)
+        ret_acc, acc_list = trd_ctx.get_acc_list()
+        
+        if ret_acc != RET_OK or acc_list.empty:
+            trd_ctx.close()
+            return None, None, "獲取賬戶列表失敗"
+            
+        real_accs = acc_list[acc_list['trd_env'] == 'REAL']
+        target_acc = real_accs.iloc[0] if not real_accs.empty else acc_list.iloc[0]
+        trd_env = TrdEnv.REAL if not real_accs.empty else TrdEnv.SIMULATE
+        target_acc_id = int(target_acc['acc_id'])
+        
+        ret_funds, df_funds = trd_ctx.accinfo_query(trd_env=trd_env, acc_id=target_acc_id, currency=Currency.USD)
+        fund_summary = {}
+        if ret_funds == RET_OK and not df_funds.empty:
+            row = df_funds.iloc[0]
+            fund_summary = {
+                'total_assets': safe_float(row.get('total_assets')),
+                'cash': safe_float(row.get('cash')),
+                'market_val': safe_float(row.get('market_val')),
+                'unrealized_pl': safe_float(row.get('unrealized_pl')),
+                'acc_id': str(target_acc_id),
+                'trd_env': 'REAL' if trd_env == TrdEnv.REAL else 'SIMULATE'
+            }
+            
+        ret_pos, df_pos = trd_ctx.position_list_query(trd_env=trd_env, acc_id=target_acc_id)
+        pos_df = pd.DataFrame()
+        if ret_pos == RET_OK and not df_pos.empty:
+            pos_df = df_pos.copy()
+            for col in ['cost_price', 'nominal_price', 'market_val', 'pl_val', 'pl_ratio', 'qty', 'can_sell_qty']:
+                if col in pos_df.columns:
+                    pos_df[col] = pos_df[col].apply(safe_float)
+            
+        trd_ctx.close()
+        return fund_summary, pos_df, "OK"
+    except Exception as e:
+        log_event(f"持倉查詢異常: {str(e)}", "ERROR")
+        return None, None, str(e)
