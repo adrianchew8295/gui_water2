@@ -1,100 +1,81 @@
 # 文件名: app.py
-# 功能: 统一主入口 · 支持【标的与数据中枢】与【Moomoo 真实持仓/资金罗盘】顶层切换
+# 职责: 侧边栏主导航 (QQQ 置顶) + 右侧多子 Tab 容器装载
 
 import streamlit as st
 from data_engine import hub_engine
 import chart_view_plugin
+from portfolio_manager_plugin import render_portfolio_securities, render_portfolio_analysis
 
-# 页面基础配置
 st.set_page_config(
-    page_title="Market Data Hub & Portfolio", 
-    page_icon="🌊", 
+    page_title="GUI Water Terminal",
+    page_icon="🌊",
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
-# 顶部主导航 Tab 栏
-main_tab1, main_tab2 = st.tabs([
-    "📊 标的与数据中枢 (Market Data Hub)",
-    "💼 个人真实持仓与资金罗盘 (Moomoo Portfolio)"
-])
+# 1. 侧边栏主导航
+st.sidebar.markdown("### 🎛️ 主控制中枢")
+main_choice = st.sidebar.radio(
+    "NAVIGATION",
+    [
+        "👑 1. US.QQQ 纳指中枢",
+        "💼 2. 我的实操持仓 (Portfolio)",
+        "📡 3. 12档核心宏观雷达",
+        "🌊 4. 波浪推演与走势预测",
+        "📋 5. 策略记账与复盘打点"
+    ],
+    index=0
+)
+
+# 2. 标的资产加载
+assets = hub_engine.load_watchlist()
 
 # -------------------------------------------------------------
-# TAB 1: 标的与多周期数据管理中枢
+# MAIN 1: QQQ 纳指中枢
 # -------------------------------------------------------------
-with main_tab1:
-    assets = hub_engine.load_watchlist()
+if main_choice == "👑 1. US.QQQ 纳指中枢":
+    st.markdown("## 👑 US.QQQ 纳指大盘总舵")
+    sub_tab1, sub_tab2, sub_tab3 = st.tabs(["📈 Chart (图表穿透)", "🧭 Analysis (战区与宏观)", "📰 News & AI 审计"])
     
-    # 侧边栏：标的管理
-    with st.sidebar:
-        st.markdown("### ⚙️ 标的管理中枢")
-        with st.expander("➕ 添加新标的"):
-            new_code = st.text_input("代码 (例: US.TSLA / CC.ETHUSD)", key="add_code").upper().strip()
-            new_name = st.text_input("标的名称 (例: 特斯拉)", key="add_name").strip()
-            new_cat = st.selectbox("分类归属", ["🚀 核心指数", "🏛️ 科技巨头", "🪙 加密资产", "📦 其他标的"], key="add_cat")
-            new_type = "CRYPTO" if "CC." in new_code else "STOCK"
-            
-            if st.button("确认添加标的", use_container_width=True):
-                if new_code and new_name:
-                    if not any(a['code'] == new_code for a in assets):
-                        assets.append({"code": new_code, "name": new_name, "category": new_cat, "type": new_type})
-                        hub_engine.save_watchlist(assets)
-                        st.success(f"已添加 {new_code}")
-                        st.rerun()
-                    else:
-                        st.warning("该标的代码已存在")
-
-        st.markdown("---")
-        st.markdown("#### 标的清单与操作")
-        for i, item in enumerate(assets):
-            c1, c2 = st.columns([4, 1])
-            c1.markdown(f"**{item['code']}** ({item['name']})")
-            if c2.button("🗑️", key=f"del_{i}"):
-                assets.pop(i)
-                hub_engine.save_watchlist(assets)
-                st.rerun()
-
-    # 主区域：分组展示行情表格与归档状态
-    categories = list(set([a.get('category', '📦 其他标的') for a in assets]))
-    for cat in sorted(categories):
-        cat_items = [a for a in assets if a.get('category') == cat]
-        with st.expander(f"📁 {cat} (共 {len(cat_items)} 档)", expanded=True):
-            # 获取实时快照
-            codes = [a['code'] for a in cat_items]
-            snap_df = hub_engine.get_realtime_snapshot(codes)
-            
-            table_data = []
-            for item in cat_items:
-                c = item['code']
-                cur_p, chg = "--", "--"
-                if snap_df is not None and not snap_df.empty and 'code' in snap_df.columns:
-                    match = snap_df[snap_df['code'] == c]
-                    if not match.empty:
-                        cur_p = f"${float(match.iloc[0].get('last_price', 0.0)):,.2f}"
-                        chg = f"{float(match.iloc[0].get('change_rate', 0.0)):+.2f}%"
-                
-                table_data.append({
-                    "标的代码": c,
-                    "标的名称": item['name'],
-                    "最新现价": cur_p,
-                    "涨跌幅": chg,
-                    "通道状态": "🟢 正常"
-                })
-            
-            if table_data:
-                st.dataframe(table_data, use_container_width=True, hide_index=True)
-
-    st.markdown("---")
-    # 多周期走势图表穿透
-    chart_view_plugin.render_chart_view(assets)
-
+    with sub_tab1:
+        c1, c2 = st.columns([3, 1])
+        with c1:
+            ktype = st.selectbox("周期切换", ["5M", "1H", "DAY"], index=0, key="qqq_ktype")
+        with c2:
+            bars = st.slider("显示柱数", 30, 300, 100, step=10, key="qqq_bars")
+        chart_view_plugin.render_lightweight_tv_chart("US.QQQ", ktype, bars)
+        
+    with sub_tab2:
+        st.markdown("### 🧭 QQQ 攻防阶梯与宏观状态")
+        st.info("💡 阶梯战区计算模块将于 Step 3 挂载（PDH/PDL、1H EMA20 动态通道）。")
+        
+    with sub_tab3:
+        st.markdown("### 📰 宏观动态与 AI 诊断反馈")
+        st.info("💡 AI 审计 Prompt 生成器将于 Step 4 接入。")
 
 # -------------------------------------------------------------
-# TAB 2: Moomoo 真实账户资金与持仓罗盘
+# MAIN 2: 个人实操持仓 (Portfolio)
 # -------------------------------------------------------------
-with main_tab2:
-    try:
-        from portfolio_manager_plugin import render_portfolio_expansion
-        render_portfolio_expansion()
-    except Exception as e:
-        st.error(f"加载持仓插件失败: {e}")
+elif main_choice == "💼 2. 我的实操持仓 (Portfolio)":
+    st.markdown("## 💼 个人实操持仓与资产罗盘")
+    sub_tab1, sub_tab2 = st.tabs(["📋 Securities (实盘美股持仓)", "💰 Analysis (资产与流动性分析)"])
+    
+    with sub_tab1:
+        render_portfolio_securities()
+        
+    with sub_tab2:
+        render_portfolio_analysis()
+
+# -------------------------------------------------------------
+# MAIN 3: 12档核心宏观雷达
+# -------------------------------------------------------------
+elif main_choice == "📡 3. 12档核心宏观雷达":
+    st.markdown("## 📡 12档核心宏观雷达")
+    st.info("💡 宏观雷达全景总表将于 Step 3 注入。")
+
+# -------------------------------------------------------------
+# MAIN 4 & 5: 预留模块
+# -------------------------------------------------------------
+else:
+    st.markdown(f"## {main_choice}")
+    st.info("模块构建中...")
