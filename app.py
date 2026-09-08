@@ -70,9 +70,9 @@ elif main_choice == "💼 2. 我的实操持仓 (Portfolio)":
 # MAIN 3: 12档核心宏观雷达
 # -------------------------------------------------------------
 elif main_choice == "📡 3. 12档核心宏观雷达":
-    st.markdown("## 📡 12档核心宏观雷达")
-    st.info("💡 宏观雷达全景总表将于 Step 3 注入。")
-
+    st.markdown("## 📡 12档核心宏观雷达与战区")
+    from macro_radar_plugin import render_macro_radar_view
+    render_macro_radar_view(assets)
 # -------------------------------------------------------------
 # MAIN 4 & 5: 预留模块
 # -------------------------------------------------------------
