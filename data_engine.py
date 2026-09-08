@@ -1,8 +1,7 @@
 # 文件名: data_engine.py
-# 職責: 全時段 5M 歷史落盤 + 自動自癒補齊 (Auto-Heal) + 1H 重採樣 + 雙軌日誌記錄
+# 職責: 完整抓取 04:00~20:00 美股盤前/常規/盤後全時段 5M 數據 + 自動合成 1H + 雙軌日誌
 
 import os
-import time
 import datetime
 import json
 import logging
@@ -16,16 +15,15 @@ WATCHLIST_PATH = os.path.join(BASE_DIR, "watchlist.json")
 LOG_PATH = os.path.join(BASE_DIR, "system_health.log")
 os.makedirs(DATA_DIR, exist_ok=True)
 
-# 配置系統日誌
 logging.basicConfig(
     filename=LOG_PATH,
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S"
+    datefmt="%Y-%m-%d %H:%M:%S",
+    encoding="utf-8"
 )
 
 def log_event(msg: str, level: str = "INFO"):
-    """寫入本地 system_health.log"""
     if level == "ERROR":
         logging.error(msg)
     elif level == "WARNING":
@@ -34,9 +32,8 @@ def log_event(msg: str, level: str = "INFO"):
         logging.info(msg)
 
 def get_active_session_info():
-    """判定當前美東時段狀態"""
     now_ny = datetime.datetime.now(tz_ny)
-    weekday = now_ny.weekday() # 0=Mon, 6=Sun
+    weekday = now_ny.weekday()
     cur_t = now_ny.time()
 
     if weekday >= 5:
@@ -65,7 +62,6 @@ def safe_float(val, default=0.0):
         return default
 
 def resample_5m_to_1h(df_5m: pd.DataFrame) -> pd.DataFrame:
-    """5M 自動聚合為 1H"""
     if df_5m is None or df_5m.empty:
         return pd.DataFrame()
     df = df_5m.copy()
@@ -119,41 +115,57 @@ class MarketDataHub:
             json.dump({"assets": assets_list}, f, ensure_ascii=False, indent=2)
 
     def auto_heal_today_data(self, code: str):
-        """【自癒補齊】自動拉取今日 04:00 以來的完整 5M K線並修復 1H"""
+        """【真·全時段補漏】拉取包含盤前 04:00 的全量 5M 並重採樣 1H"""
         ctx = self.get_context()
         if ctx is None:
             return False, "OpenD 離線"
 
         try:
             from moomoo import KLType, AuType, SubType, RET_OK
+            now_ny = datetime.datetime.now(tz_ny)
+            start_str = (now_ny - datetime.timedelta(days=7)).strftime("%Y-%m-%d")
+            end_str = now_ny.strftime("%Y-%m-%d")
+
+            # 1. 優先使用 request_history_kline 獲取包含盤前全時段的連續 5M
+            ret, df_hist, msg = ctx.request_history_kline(
+                code=code,
+                start=start_str,
+                end=end_str,
+                ktype=KLType.K_5M,
+                autype=AuType.NONE,
+                max_count=1000
+            )
+
+            # 2. 訂閱並獲取最新走動柱
             ctx.subscribe([code], [SubType.K_5M])
-            
-            # 獲取最近 100 根 5M (足夠覆蓋當天全部盤前與常規盤)
-            ret, df = ctx.get_cur_kline(code, 100, KLType.K_5M, AuType.NONE)
-            if ret == RET_OK and not df.empty:
-                df.columns = [c.lower() for c in df.columns]
-                clean_name = code.replace(".", "_")
-                csv_path_5m = os.path.join(DATA_DIR, f"{clean_name}_5M.csv")
+            ret_cur, df_cur = ctx.get_cur_kline(code, 100, KLType.K_5M, AuType.NONE)
 
-                if os.path.exists(csv_path_5m):
-                    old_df = pd.read_csv(csv_path_5m)
-                    combined = pd.concat([old_df, df], ignore_index=True)
-                    df_final = combined.drop_duplicates(subset=['time_key'], keep='last').sort_values('time_key').reset_index(drop=True)
-                else:
-                    df_final = df
+            dfs_to_merge = []
+            if ret == RET_OK and not df_hist.empty:
+                dfs_to_merge.append(df_hist)
+            if ret_cur == RET_OK and not df_cur.empty:
+                dfs_to_merge.append(df_cur)
 
-                df_final.to_csv(csv_path_5m, index=False)
-                
-                # 自動重採樣並修復 1H CSV
-                df_1h = resample_5m_to_1h(df_final)
-                if not df_1h.empty:
-                    df_1h.to_csv(os.path.join(DATA_DIR, f"{clean_name}_1H.csv"), index=False)
+            if not dfs_to_merge:
+                log_event(f"[Auto-Heal 失敗] 無法獲取 {code} 全時段數據: {msg}", "WARNING")
+                return False, "數據為空"
 
-                log_event(f"[Auto-Heal 成功] {code} 今日 5M 與 1H 數據已自動補齊校準 (共 {len(df_final)} 根 5M)")
-                return True, f"已補齊校準 {len(df_final)} 根 5M"
-            else:
-                log_event(f"[Auto-Heal 失敗] 無法從 OpenD 獲取 {code} 實時 K 線: {df}", "WARNING")
-                return False, "獲取數據為空"
+            df_all = pd.concat(dfs_to_merge, ignore_index=True)
+            df_all.columns = [c.lower().strip() for c in df_all.columns]
+            df_final = df_all.drop_duplicates(subset=['time_key']).sort_values('time_key').reset_index(drop=True)
+
+            clean_name = code.replace(".", "_")
+            csv_path_5m = os.path.join(DATA_DIR, f"{clean_name}_5M.csv")
+            df_final.to_csv(csv_path_5m, index=False)
+
+            # 重採樣生成 1H
+            df_1h = resample_5m_to_1h(df_final)
+            if not df_1h.empty:
+                df_1h.to_csv(os.path.join(DATA_DIR, f"{clean_name}_1H.csv"), index=False)
+
+            log_event(f"[Auto-Heal 成功] {code} 盤前全時段 5M 與 1H 已補齊落盤 (共 {len(df_final)} 根 5M)")
+            return True, f"已補齊全時段 {len(df_final)} 根 5M"
+
         except Exception as e:
             log_event(f"[Auto-Heal 異常] {code}: {str(e)}", "ERROR")
             return False, str(e)
@@ -173,45 +185,3 @@ class MarketDataHub:
         return None
 
 hub_engine = MarketDataHub()
-
-def get_moomoo_real_portfolio(host='127.0.0.1', port=11111):
-    try:
-        from moomoo import OpenSecTradeContext, TrdMarket, TrdEnv, Currency, RET_OK
-        trd_ctx = OpenSecTradeContext(filter_trdmarket=TrdMarket.NONE, host=host, port=port)
-        ret_acc, acc_list = trd_ctx.get_acc_list()
-        
-        if ret_acc != RET_OK or acc_list.empty:
-            trd_ctx.close()
-            return None, None, f"獲取賬戶列表失敗"
-            
-        real_accs = acc_list[acc_list['trd_env'] == 'REAL']
-        target_acc = real_accs.iloc[0] if not real_accs.empty else acc_list.iloc[0]
-        trd_env = TrdEnv.REAL if not real_accs.empty else TrdEnv.SIMULATE
-        target_acc_id = int(target_acc['acc_id'])
-        
-        ret_funds, df_funds = trd_ctx.accinfo_query(trd_env=trd_env, acc_id=target_acc_id, currency=Currency.USD)
-        fund_summary = {}
-        if ret_funds == RET_OK and not df_funds.empty:
-            row = df_funds.iloc[0]
-            fund_summary = {
-                'total_assets': safe_float(row.get('total_assets')),
-                'cash': safe_float(row.get('cash')),
-                'market_val': safe_float(row.get('market_val')),
-                'unrealized_pl': safe_float(row.get('unrealized_pl')),
-                'acc_id': str(target_acc_id),
-                'trd_env': 'REAL' if trd_env == TrdEnv.REAL else 'SIMULATE'
-            }
-            
-        ret_pos, df_pos = trd_ctx.position_list_query(trd_env=trd_env, acc_id=target_acc_id)
-        pos_df = pd.DataFrame()
-        if ret_pos == RET_OK and not df_pos.empty:
-            pos_df = df_pos.copy()
-            for col in ['cost_price', 'nominal_price', 'market_val', 'pl_val', 'pl_ratio', 'qty', 'can_sell_qty']:
-                if col in pos_df.columns:
-                    pos_df[col] = pos_df[col].apply(safe_float)
-            
-        trd_ctx.close()
-        return fund_summary, pos_df, "OK"
-    except Exception as e:
-        log_event(f"持倉查詢異常: {str(e)}", "ERROR")
-        return None, None, str(e)
