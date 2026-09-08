@@ -1,5 +1,5 @@
 # 文件名: chart_view_plugin.py
-# 職責: 渲染 TradingView Lightweight Charts (全時段盤前盤後遮罩 + PMH/PML/EMA20 攻防水平線)
+# 職責: 渲染 TradingView Lightweight Charts (含出圖前缺口自動探測與靜默 Auto-Heal 補齊)
 
 import os
 import datetime
@@ -9,20 +9,60 @@ import streamlit as st
 import streamlit.components.v1 as components
 import pytz
 from radar_engine import compute_radar_metrics
+from data_engine import hub_engine, get_active_session_info
 
 tz_ny = pytz.timezone("America/New_York")
 DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "market_data")
 
+def check_and_auto_heal(code: str):
+    """
+    探測本地 5M CSV 是否存在時間缺口 (落後當前美東時間超過 5 分鐘)
+    若有缺口，自動觸發靜默 Auto-Heal 補齊
+    """
+    clean_name = code.replace(".", "_")
+    csv_5m = os.path.join(DATA_DIR, f"{clean_name}_5M.csv")
+    
+    session_id, _, now_ny = get_active_session_info()
+    
+    # 非交易時段不強制報警
+    if session_id in ["CLOSED_WEEKEND", "CLOSED_NIGHT"]:
+        return
+
+    need_heal = False
+    if not os.path.exists(csv_5m):
+        need_heal = True
+    else:
+        try:
+            df = pd.read_csv(csv_5m)
+            if df.empty or 'time_key' not in df.columns:
+                need_heal = True
+            else:
+                last_time_str = df.iloc[-1]['time_key']
+                last_dt = pd.to_datetime(last_time_str).tz_localize(tz_ny)
+                gap_minutes = (now_ny - last_dt).total_seconds() / 60.0
+                
+                # 如果距離當前時間超過 5.5 分鐘，說明少拿了最新收盤柱
+                if gap_minutes > 5.5:
+                    need_heal = True
+        except Exception:
+            need_heal = True
+
+    if need_heal:
+        hub_engine.auto_heal_today_data(code)
+
 def render_lightweight_tv_chart(code: str, ktype_str: str = "5M", bars_count: int = 120):
     """
     渲染嵌入式 TradingView Lightweight Charts
-    包含: 主圖 K 線、1H EMA20、PDH/PDL、PMH/PML 水平線、成交量副圖
+    包含: 出圖前主動缺口修復、主圖 K 線、1H EMA20、PDH/PDL、PMH/PML 水平線、成交量副圖
     """
+    # 1. 出圖前主動自癒補齊
+    check_and_auto_heal(code)
+
     clean_name = code.replace(".", "_")
     csv_path = os.path.join(DATA_DIR, f"{clean_name}_{ktype_str}.csv")
 
     if not os.path.exists(csv_path):
-        st.warning(f"⚪ 暫無 {code} {ktype_str} 本地數據，請在側邊欄同步或檢查 OpenD。")
+        st.warning(f"⚪ 暫無 {code} {ktype_str} 本地數據，正在嘗試抓取中...")
         return
 
     try:
@@ -65,7 +105,6 @@ def render_lightweight_tv_chart(code: str, ktype_str: str = "5M", bars_count: in
         # 計算攻防線指標
         metrics = compute_radar_metrics(code, live_price=candles_data[-1]['close'] if candles_data else 0.0)
 
-        # 注入 Lightweight Charts 前端 HTML / JS
         html_code = f"""
         <!DOCTYPE html>
         <html>
@@ -116,7 +155,6 @@ def render_lightweight_tv_chart(code: str, ktype_str: str = "5M", bars_count: in
                     }},
                 }});
 
-                // 1. K 線主圖
                 const candleSeries = chart.addCandlestickSeries({{
                     upColor: '#00E676',
                     downColor: '#FF5252',
@@ -127,7 +165,6 @@ def render_lightweight_tv_chart(code: str, ktype_str: str = "5M", bars_count: in
                 const candleData = {json.dumps(candles_data)};
                 candleSeries.setData(candleData);
 
-                // 2. 成交量副圖
                 const volumeSeries = chart.addHistogramSeries({{
                     priceFormat: {{ type: 'volume' }},
                     priceScaleId: '',
@@ -139,7 +176,6 @@ def render_lightweight_tv_chart(code: str, ktype_str: str = "5M", bars_count: in
                 const volData = {json.dumps(volume_data)};
                 volumeSeries.setData(volData);
 
-                // 3. 攻防水平線: PMH / PML / PDH / PDL / EMA20
                 const pmh = {metrics['pmh']};
                 const pml = {metrics['pml']};
                 const pdh = {metrics['pdh']};
