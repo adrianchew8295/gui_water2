@@ -1,5 +1,5 @@
 # 文件名: app.py
-# 職責: 頂部時段狀態對齊 (Active Session) + 自動自癒數據補齊 + 側邊欄主導航 + 雙軌日誌黑匣子
+# 職責: 頂部時段狀態對齊 (Active Session) + 側邊欄主導航 + 雙軌日誌黑匣子 (已解除靜態鎖)
 
 import os
 import streamlit as st
@@ -32,12 +32,7 @@ with col_t1:
 with col_t2:
     st.caption(f"美東: {now_ny.strftime('%Y-%m-%d %H:%M:%S ET')} | 馬來西亞: {now_myt.strftime('%H:%M:%S MYT')}")
 
-# 2. 自動執行 QQQ 今日數據自癒補漏 (Auto-Heal)
-if "auto_heal_done" not in st.session_state:
-    hub_engine.auto_heal_today_data("US.QQQ")
-    st.session_state["auto_heal_done"] = True
-
-# 3. 側邊欄主導航
+# 2. 側邊欄主導航
 st.sidebar.markdown("### 🎛️ 主控制中樞")
 main_choice = st.sidebar.radio(
     "NAVIGATION",
@@ -51,7 +46,7 @@ main_choice = st.sidebar.radio(
     index=0
 )
 
-# 側邊欄手動修復按鈕
+# 側邊欄手動自癒按鈕
 if st.sidebar.button("🔄 手動自癒補齊今日數據", use_container_width=True):
     ok, msg = hub_engine.auto_heal_today_data("US.QQQ")
     if ok:
@@ -117,20 +112,20 @@ elif main_choice == "📡 3. 12檔核心宏觀雷達":
     render_macro_radar_view(assets)
 
 # -------------------------------------------------------------
-# MAIN 4 & 5
+# MAIN 4 & 5: 預留模組
 # -------------------------------------------------------------
 else:
     st.markdown(f"## {main_choice}")
     st.info("模組持續迭代中...")
 
 # -------------------------------------------------------------
-# 底部黑匣子: 系統狀態與數據健康日誌 (Logging Drawer)
+# 底部黑匣子: 系統狀態與數據健康日誌
 # -------------------------------------------------------------
 st.markdown("---")
 with st.expander("🔍 系統數據健康與審核日誌 (System Health Log)", expanded=False):
     if os.path.exists(LOG_PATH):
         with open(LOG_PATH, "r", encoding="utf-8") as f:
             logs = f.readlines()
-            st.code("".join(logs[-15:]), language="text") # 顯示最新 15 條日誌
+            st.code("".join(logs[-15:]), language="text")
     else:
         st.info("⚪ 暫無日誌記錄。")
