@@ -1,173 +1,113 @@
 # 文件名: macro_radar_plugin.py
-# 職責: 渲染專業 Murphy 日線技術圖表 (300~500 根日 K 線 + 局部精準通道 + S/R 與 Major Support + 艾略特波浪 HUD)
+# 職責: 渲染專業日線幾何圖表、繪圖圖層獨立 ON/OFF 開關、AI Markdown 輸出框
 
-import os
-import json
-import datetime
-import pandas as pd
 import streamlit as st
-import streamlit.components.v1 as components
-from data_engine import hub_engine
-from macro_radar_engine import compute_murphy_technicals
+import plotly.graph_objects as go
+import pandas as pd
+from macro_radar_engine import compute_radar_channel_and_markdown
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DATA_DIR = os.path.join(BASE_DIR, "market_data")
-
-def render_murphy_daily_chart(code: str, bars_count: int = 300):
-    clean_name = code.replace(".", "_")
-    csv_path = os.path.join(DATA_DIR, f"{clean_name}_DAY.csv")
-
-    if not os.path.exists(csv_path):
-        st.warning(f"⚪ 正在獲取 {code} 日線歷史數據...")
+def render_macro_radar_view(df: pd.DataFrame, ticker: str = "US.NVDA"):
+    if df is None or df.empty:
+        st.warning("⚠️ 當前標的暫無歷史日線數據")
         return
 
-    try:
-        df = pd.read_csv(csv_path)
-        df.columns = [c.lower().strip() for c in df.columns]
-        if df.empty or 'time_key' not in df.columns:
-            st.warning(f"⚪ {code} 日線數據為空。")
-            return
+    # 1. 執行幾何計算
+    data = compute_radar_channel_and_markdown(df, ticker=ticker)
+    if data["status"] != "success":
+        st.error(f"❌ 計算失敗: {data.get('msg')}")
+        return
 
-        df['dt'] = pd.to_datetime(df['time_key'])
-        df = df.sort_values('dt').tail(bars_count).copy()
+    chan = data["macro_channel"]
+    curr_p = data["curr_price"]
+    maj_sup = data["major_support"]
+    rec_res = data["recent_res"]
+    rec_sup = data["recent_sup"]
 
-        tech_res = compute_murphy_technicals(df)
-
-        candles_data = []
-        for _, row in df.iterrows():
-            t_str = row['dt'].strftime('%Y-%m-%d')
-            candles_data.append({
-                "time": t_str,
-                "open": float(row.get('open', 0.0)),
-                "high": float(row.get('high', 0.0)),
-                "low": float(row.get('low', 0.0)),
-                "close": float(row.get('close', 0.0))
-            })
-
-        last_c = candles_data[-1] if candles_data else {}
-        trend_status_str = "🟢 上升通道" if tech_res.get('trend_type') == 'UPTREND' else ("🔴 下降通道" if tech_res.get('trend_type') == 'DOWNTREND' else "⚪ 區間箱體")
-
-        html_code = f"""
-        <!DOCTYPE html>
-        <html>
-        <head>
-            <meta charset="utf-8" />
-            <script src="https://unpkg.com/lightweight-charts@4.1.1/dist/lightweight-charts.standalone.production.js"></script>
-            <style>
-                * {{ box-sizing: border-box; }}
-                body {{
-                    margin: 0; padding: 0;
-                    background-color: #06090E; color: #CBD5E1;
-                    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-                    overflow: hidden;
-                }}
-                #wrapper {{ position: relative; width: 100%; height: 600px; }}
-                #hud-panel {{
-                    position: absolute; top: 10px; left: 14px; z-index: 10;
-                    font-size: 13px; font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
-                    background: rgba(15, 23, 42, 0.92); padding: 8px 16px; border-radius: 8px;
-                    border: 1px solid #1E293B; pointer-events: none; line-height: 1.6;
-                }}
-                #chart-container {{ position: absolute; top: 0; left: 0; width: 100%; height: 600px; z-index: 2; }}
-            </style>
-        </head>
-        <body>
-            <div id="wrapper">
-                <div id="hud-panel">
-                    <b>📡 {code} · 純日線技術幾何通道 (John J. Murphy 體系)</b><br/>
-                    狀態: <b>{trend_status_str}</b> &nbsp;|&nbsp; <b>{tech_res.get('wave_label', '')}</b><br/>
-                    現價: <b style="color:#38BDF8;">${last_c.get('close', 0.0):.2f}</b> &nbsp;|&nbsp; 
-                    阻力 (Resistance): <b style="color:#FF5252;">${tech_res.get('immediate_resistance', 0.0):.2f}</b> &nbsp;|&nbsp; 
-                    支撐 (Support): <b style="color:#00E676;">${tech_res.get('immediate_support', 0.0):.2f}</b>
-                </div>
-                <div id="chart-container"></div>
+    # 2. 頂部 HUD 狀態卡 (黑底金屬風)
+    st.markdown(
+        f"""
+        <div style="background-color: #0e1117; border: 1px solid #30363d; border-radius: 8px; padding: 12px 18px; margin-bottom: 12px; font-family: monospace;">
+            <span style="color: #58a6ff; font-weight: bold; font-size: 15px;">📊 {ticker} · 純日線技術幾何通道 (John J. Murphy 體系)</span><br>
+            <div style="margin-top: 6px; display: flex; gap: 20px; font-size: 13px; color: #c9d1d9;">
+                <span>現價: <b style="color: #79c0ff;">${curr_p:.2f}</b></span>
+                <span>即時阻力 (RES): <b style="color: #ff7b72;">${rec_res:.2f}</b></span>
+                <span>即時支撐 (SUP): <b style="color: #56d364;">${rec_sup:.2f}</b></span>
+                <span>⭐ 當前波段重大支撐: <b style="color: #00e5ff;">${maj_sup:.2f}</b></span>
             </div>
-            <script>
-                const container = document.getElementById('chart-container');
-                const chart = LightweightCharts.createChart(container, {{
-                    layout: {{ background: {{ color: 'transparent' }}, textColor: '#94A3B8' }},
-                    grid: {{ vertLines: {{ color: '#131B2E' }}, horzLines: {{ color: '#131B2E' }} }},
-                    crosshair: {{ mode: LightweightCharts.CrosshairMode.Normal }},
-                    rightPriceScale: {{ borderColor: '#1E293B', scaleMargins: {{ top: 0.1, bottom: 0.1 }} }},
-                    timeScale: {{ borderColor: '#1E293B', fixLeftEdge: false, rightOffset: 8 }}
-                }});
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
 
-                const candleSeries = chart.addCandlestickSeries({{
-                    upColor: '#00E676', downColor: '#FF5252', borderVisible: false,
-                    wickUpColor: '#00E676', wickDownColor: '#FF5252'
-                }});
-                const rawCandles = {json.dumps(candles_data)};
-                candleSeries.setData(rawCandles);
+    # 3. 繪圖圖層 ON/OFF 開關控制列 (人性化操作)
+    st.markdown("##### 🎛️ 圖表繪圖圖層控制 (Drawing Toggles)")
+    c1, c2, c3, c4, c5 = st.columns(5)
+    with c1:
+        show_channel = st.checkbox("📐 趨勢通道 (Channel)", value=True)
+    with c2:
+        show_sr = st.checkbox("🧱 即時 S/R 水平線", value=True)
+    with c3:
+        show_major = st.checkbox("⭐ 重大支撐 (Major Sup)", value=True)
+    with c4:
+        show_pivots = st.checkbox("🏷️ 極值點錨點標籤", value=True)
+    with c5:
+        zoom_recent = st.checkbox("🔍 聚焦最近 120 根 K 線", value=True)
 
-                // 1. 標註 Major Support (粗青色底線)
-                const majorSup = {tech_res.get('major_support', 0.0)};
-                if (majorSup > 0) {{
-                    candleSeries.createPriceLine({{
-                        price: majorSup, color: '#06B6D4', lineWidth: 2, lineStyle: LightweightCharts.LineStyle.Solid,
-                        axisLabelVisible: true, title: `⭐ MAJOR SUPPORT: $${{majorSup.toFixed(2)}}`
-                    }});
-                }}
+    # 4. 數據視窗剪裁（若勾選聚焦近 120 根，Y 軸將呈現最舒服的比例）
+    plot_df = df.iloc[-120:].copy() if (zoom_recent and len(df) > 120) else df.copy()
 
-                // 2. 標註 S/R 水平線
-                const immRes = {tech_res.get('immediate_resistance', 0.0)};
-                const immSup = {tech_res.get('immediate_support', 0.0)};
-                if (immRes > 0) {{
-                    candleSeries.createPriceLine({{
-                        price: immRes, color: '#FF5252', lineWidth: 1, lineStyle: LightweightCharts.LineStyle.Dashed,
-                        axisLabelVisible: true, title: `RES: $${{immRes.toFixed(2)}}`
-                    }});
-                }}
-                if (immSup > 0) {{
-                    candleSeries.createPriceLine({{
-                        price: immSup, color: '#00E676', lineWidth: 1, lineStyle: LightweightCharts.LineStyle.Dashed,
-                        axisLabelVisible: true, title: `SUP: $${{immSup.toFixed(2)}}`
-                    }});
-                }}
+    # 5. 繪製 Plotly 圖表
+    fig = go.Figure()
 
-                // 3. 繪製局部段落趨勢線 (從起點連至最新，絕不貫穿全屏)
-                const tLines = {json.dumps(tech_res.get('trend_lines', []))};
-                tLines.forEach(line => {{
-                    const lineSeries = chart.addLineSeries({{
-                        color: line.color, lineWidth: 2, lineStyle: LightweightCharts.LineStyle.Solid,
-                        crosshairMarkerVisible: false
-                    }});
-                    lineSeries.setData([
-                        {{ time: line.from_time, value: line.from_price }},
-                        {{ time: line.to_time, value: line.to_price }}
-                    ]);
-                }});
+    # K 線主體
+    fig.add_trace(go.Candlestick(
+        x=plot_df['time_clean'],
+        open=plot_df['open'], high=plot_df['high'],
+        low=plot_df['low'], close=plot_df['close'],
+        name="日K線",
+        increasing_line_color='#26a69a', decreasing_line_color='#ef5350'
+    ))
 
-                // 4. 繪製精準平行通道軌道線
-                const cLines = {json.dumps(tech_res.get('channel_lines', []))};
-                cLines.forEach(line => {{
-                    const channelSeries = chart.addLineSeries({{
-                        color: line.color, lineWidth: 2, lineStyle: LightweightCharts.LineStyle.Dashed,
-                        crosshairMarkerVisible: false
-                    }});
-                    channelSeries.setData([
-                        {{ time: line.from_time, value: line.from_price }},
-                        {{ time: line.to_time, value: line.to_price }}
-                    ]);
-                }});
+    # [開關 1] 繪製趨勢通道線
+    if show_channel and chan:
+        res_x = [p["time"] for p in chan["res_line"] if p["time"] in plot_df['time_clean'].values]
+        res_y = [p["value"] for p in chan["res_line"] if p["time"] in plot_df['time_clean'].values]
+        sup_x = [p["time"] for p in chan["sup_line"] if p["time"] in plot_df['time_clean'].values]
+        sup_y = [p["value"] for p in chan["sup_line"] if p["time"] in plot_df['time_clean'].values]
 
-                chart.timeScale().fitContent();
-            </script>
-        </body>
-        </html>
-        """
-        components.html(html_code, height=620, scrolling=False)
+        if res_x:
+            fig.add_trace(go.Scatter(x=res_x, y=res_y, mode='lines', line=dict(color='#ffd600', width=2, dash='dash'), name="通道阻力 (Upper)"))
+        if sup_x:
+            fig.add_trace(go.Scatter(x=sup_x, y=sup_y, mode='lines', line=dict(color='#00e676', width=2, dash='solid'), name="通道支撐 (Lower)"))
 
-    except Exception as e:
-        st.error(f"❌ 雷達日線渲染異常: {str(e)}")
+    # [開關 2] 繪製即時 S/R
+    if show_sr:
+        fig.add_hline(y=rec_res, line_dash="dot", line_color="#ff5252", annotation_text=f"RES: ${rec_res:.2f}", annotation_position="top right")
+        fig.add_hline(y=rec_sup, line_dash="dot", line_color="#00e676", annotation_text=f"SUP: ${rec_sup:.2f}", annotation_position="bottom right")
 
-def render_macro_radar_view(assets):
-    st.markdown("### 📡 12 檔核心宏觀雷達 · 純日線技術幾何畫布")
-    
-    code_list = [a['code'] for a in assets]
-    col1, col2 = st.columns([3, 2])
-    with col1:
-        sel_code = st.selectbox("🎯 選擇穿透標的", code_list, index=0, key="macro_radar_code_select")
-    with col2:
-        bars_count = st.slider("📅 歷史日 K 深度", min_value=100, max_value=500, value=300, step=50, key="macro_radar_bars_slider")
+    # [開關 3] 繪製當前大波段 Major Support
+    if show_major:
+        fig.add_hline(y=maj_sup, line_dash="solid", line_width=2, line_color="#00e5ff", annotation_text=f"⭐ MAJOR SUPPORT: ${maj_sup:.2f}", annotation_position="bottom right")
 
-    render_murphy_daily_chart(sel_code, bars_count=bars_count)
+    # [開關 4] 標記錨點極值標籤
+    if show_pivots and chan:
+        for pt, label, color in [(chan["h1"], "峰1", "#ff5252"), (chan["h2"], "峰2", "#ff5252"), (chan["l1"], "谷1", "#00e676"), (chan["l2"], "谷2", "#00e676")]:
+            if pt and pt["time"] in plot_df['time_clean'].values:
+                fig.add_annotation(x=pt["time"], y=pt["price"], text=f"{label}: ${pt['price']:.2f}", showarrow=True, arrowhead=2, yshift=10 if "峰" in label else -10, font=dict(color=color, size=11))
+
+    fig.update_layout(
+        template="plotly_dark",
+        height=540,
+        margin=dict(l=10, r=60, t=10, b=10),
+        xaxis_rangeslider_visible=False,
+        showlegend=True,
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+    )
+
+    st.plotly_chart(fig, use_container_width=True)
+
+    # 6. 專屬 AI 分析 Markdown 導出代碼框 (一鍵複製)
+    st.divider()
+    st.markdown("#### 🤖 AI 策略軍師專用診斷 Markdown 日誌 (可直接複製發送給 AI)")
+    st.caption("點擊下方右上角按鈕即可直接複製完整技術幾何數據，貼入 ChatGPT / Claude / Gemini 進行深度推演。")
+    st.code(data["ai_markdown"], language="markdown")
