@@ -1,144 +1,177 @@
-# 文件名: macro_radar_engine.py
-# 職責: 依據 John J. Murphy 原著算法提取 300~500 根日線之 S/R、Major Support、Trendlines、Channels 與 Wave 狀態
+# 文件名: macro_radar_plugin.py
+# 職責: 渲染 12 檔核心宏觀雷達純日線圖表 (300~500 根日 K 線 + 移除 Volume + 自動繪製 Trendline/Channel/Major Support/Wave HUD)
 
-import numpy as np
+import os
+import json
+import datetime
 import pandas as pd
+import streamlit as st
+import streamlit.components.v1 as components
+import pytz
+from data_engine import hub_engine
+from macro_radar_engine import compute_murphy_technicals
 
-def extract_pivot_points(df: pd.DataFrame, window: int = 5):
-    """
-    依據 Murphy 第 4 章定義：提取客觀擺動波峰 (Peaks) 與波谷 (Troughs)
-    """
-    highs = df['high'].values
-    lows = df['low'].values
-    n = len(df)
-    
-    pivot_highs = []
-    pivot_lows = []
-    
-    for i in range(window, n - window):
-        # 局部波峰判定
-        if highs[i] == max(highs[i - window : i + window + 1]):
-            pivot_highs.append((i, df['time_key'].iloc[i], highs[i]))
-        # 局部波谷判定
-        if lows[i] == min(lows[i - window : i + window + 1]):
-            pivot_lows.append((i, df['time_key'].iloc[i], lows[i]))
-            
-    return pivot_highs, pivot_lows
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DATA_DIR = os.path.join(BASE_DIR, "market_data")
 
-def compute_murphy_technicals(df_daily: pd.DataFrame):
-    """
-    計算 Murphy 經典技術幾何特徵：
-    1. Trendlines (上升/下降趨勢線)
-    2. Trend Channels (平行通道)
-    3. S/R Levels (即時支撐/阻力)
-    4. Major Support (大級別重大支撐)
-    5. Elliott Wave (日線浪型推演)
-    """
-    if df_daily is None or len(df_daily) < 30:
-        return {}
-    
-    df = df_daily.copy().reset_index(drop=True)
-    pivot_highs, pivot_lows = extract_pivot_points(df, window=5)
-    
-    current_price = float(df['close'].iloc[-1])
-    n = len(df)
-    
-    # 1. 計算 S/R 與 Major Support
-    # 尋找現價上方的最近有效阻力峰值
-    res_candidates = [p[2] for p in pivot_highs if p[2] > current_price]
-    immediate_resistance = min(res_candidates) if res_candidates else float(df['high'].max())
-    
-    # 尋找現價下方的最近有效支撐谷值
-    sup_candidates = [p[2] for p in pivot_lows if p[2] < current_price]
-    immediate_support = max(sup_candidates) if sup_candidates else float(df['low'].min())
-    
-    # Major Support: 過去 300 根的歷史強支撐底線 (多次觸及的低點聚合或最低點)
-    major_support = float(df['low'].tail(300).min())
-    
-    # 2. 計算 Trendlines 與 Channels (Murphy Chapter 4)
-    trend_type = "SIDEWAYS"
-    trend_lines = []
-    channel_lines = []
-    
-    if len(pivot_lows) >= 2 and len(pivot_highs) >= 2:
-        last_l2 = pivot_lows[-2]
-        last_l1 = pivot_lows[-1]
-        last_h2 = pivot_highs[-2]
-        last_h1 = pivot_highs[-1]
-        
-        # 上升趨勢線 (Up Trendline: 連接抬高的低點)
-        if last_l1[2] > last_l2[2]:
-            slope = (last_l1[2] - last_l2[2]) / (last_l1[0] - last_l2[0]) if last_l1[0] != last_l2[0] else 0
-            if slope > 0:
-                trend_type = "UPTREND"
-                # 趨勢線端點 (延伸至當前根)
-                p1_val = last_l2[2]
-                curr_val = last_l2[2] + slope * (n - 1 - last_l2[0])
-                trend_lines.append({
-                    "type": "UP_TRENDLINE",
-                    "from_time": last_l2[1],
-                    "to_time": df['time_key'].iloc[-1],
-                    "from_price": p1_val,
-                    "to_price": curr_val,
-                    "color": "#00E676"
-                })
-                # 平行通道線 (從中間的高點引出平行線)
-                channel_high = max([h[2] for h in pivot_highs if h[0] > last_l2[0]] or [last_h1[2]])
-                offset = channel_high - (last_l2[2] + slope * (last_h1[0] - last_l2[0]))
-                channel_lines.append({
-                    "type": "UP_CHANNEL",
-                    "from_time": last_l2[1],
-                    "to_time": df['time_key'].iloc[-1],
-                    "from_price": p1_val + offset,
-                    "to_price": curr_val + offset,
-                    "color": "#FACC15"
-                })
-                
-        # 下降趨勢線 (Down Trendline: 連接降低的高點)
-        elif last_h1[2] < last_h2[2]:
-            slope = (last_h1[2] - last_h2[2]) / (last_h1[0] - last_h2[0]) if last_h1[0] != last_h2[0] else 0
-            if slope < 0:
-                trend_type = "DOWNTREND"
-                p1_val = last_h2[2]
-                curr_val = last_h2[2] + slope * (n - 1 - last_h2[0])
-                trend_lines.append({
-                    "type": "DOWN_TRENDLINE",
-                    "from_time": last_h2[1],
-                    "to_time": df['time_key'].iloc[-1],
-                    "from_price": p1_val,
-                    "to_price": curr_val,
-                    "color": "#FF5252"
-                })
-                # 下降平行通道線
-                channel_low = min([l[2] for l in pivot_lows if l[0] > last_h2[0]] or [last_l1[2]])
-                offset = channel_low - (last_h2[2] + slope * (last_l1[0] - last_h2[0]))
-                channel_lines.append({
-                    "type": "DOWN_CHANNEL",
-                    "from_time": last_h2[1],
-                    "to_time": df['time_key'].iloc[-1],
-                    "from_price": p1_val + offset,
-                    "to_price": curr_val + offset,
-                    "color": "#FACC15"
-                })
+def render_murphy_daily_chart(code: str, bars_count: int = 300):
+    clean_name = code.replace(".", "_")
+    csv_path = os.path.join(DATA_DIR, f"{clean_name}_DAY.csv")
 
-    # 3. 艾略特波浪推演 (Murphy Chapter 13)
-    wave_label = "🌊 艾略特狀態: 結構整固蓄勢中"
-    if trend_type == "UPTREND":
-        if current_price >= immediate_resistance * 0.98:
-            wave_label = "🌊 艾略特形態: 第 ⑤ 浪衝頂突破推進中"
-        else:
-            wave_label = "🌊 艾略特形態: 第 ③ 浪主升浪強勢運行"
-    elif trend_type == "DOWNTREND":
-        wave_label = "🌊 艾略特形態: 第 (C) 浪主跌/深度調整結構"
-    else:
-        wave_label = "🌊 艾略特形態: 第 ④ 浪 (A)-(B)-(C) 寬幅箱體修復"
+    if not os.path.exists(csv_path):
+        st.warning(f"⚪ 正在載入 {code} 日線歷史數據...")
+        return
 
-    return {
-        "trend_type": trend_type,
-        "immediate_resistance": immediate_resistance,
-        "immediate_support": immediate_support,
-        "major_support": major_support,
-        "trend_lines": trend_lines,
-        "channel_lines": channel_lines,
-        "wave_label": wave_label
-    }
+    try:
+        df = pd.read_csv(csv_path)
+        df.columns = [c.lower().strip() for c in df.columns]
+        if df.empty or 'time_key' not in df.columns:
+            st.warning(f"⚪ {code} 日線數據為空。")
+            return
+
+        df['dt'] = pd.to_datetime(df['time_key'])
+        df = df.sort_values('dt').tail(bars_count).copy()
+
+        # 執行 Murphy 幾何與波浪運算
+        tech_res = compute_murphy_technicals(df)
+
+        candles_data = []
+        for _, row in df.iterrows():
+            # 轉換為標準日期文字 (YYYY-MM-DD)
+            t_str = row['dt'].strftime('%Y-%m-%d')
+            candles_data.append({
+                "time": t_str,
+                "open": float(row.get('open', 0.0)),
+                "high": float(row.get('high', 0.0)),
+                "low": float(row.get('low', 0.0)),
+                "close": float(row.get('close', 0.0))
+            })
+
+        last_c = candles_data[-1] if candles_data else {}
+        trend_status_str = "🟢 上升趨勢" if tech_res.get('trend_type') == 'UPTREND' else ("🔴 下降趨勢" if tech_res.get('trend_type') == 'DOWNTREND' else "⚪ 箱體震盪")
+
+        html_code = f"""
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <meta charset="utf-8" />
+            <script src="https://unpkg.com/lightweight-charts@4.1.1/dist/lightweight-charts.standalone.production.js"></script>
+            <style>
+                * {{ box-sizing: border-box; }}
+                body {{
+                    margin: 0; padding: 0;
+                    background-color: #06090E; color: #CBD5E1;
+                    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+                    overflow: hidden;
+                }}
+                #wrapper {{ position: relative; width: 100%; height: 600px; }}
+                #hud-panel {{
+                    position: absolute; top: 10px; left: 14px; z-index: 10;
+                    font-size: 13px; font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+                    background: rgba(15, 23, 42, 0.92); padding: 8px 16px; border-radius: 8px;
+                    border: 1px solid #1E293B; pointer-events: none; line-height: 1.6;
+                }}
+                #chart-container {{ position: absolute; top: 0; left: 0; width: 100%; height: 600px; z-index: 2; }}
+            </style>
+        </head>
+        <body>
+            <div id="wrapper">
+                <div id="hud-panel">
+                    <b>📡 {code} · 純日線技術幾何畫布 (John J. Murphy 體系)</b><br/>
+                    狀態: <b>{trend_status_str}</b> &nbsp;|&nbsp; <b>{tech_res.get('wave_label', '')}</b><br/>
+                    現價: <b style="color:#38BDF8;">${last_c.get('close', 0.0):.2f}</b> &nbsp;|&nbsp; 
+                    阻力 (Resistance): <b style="color:#FF5252;">${tech_res.get('immediate_resistance', 0.0):.2f}</b> &nbsp;|&nbsp; 
+                    支撐 (Support): <b style="color:#00E676;">${tech_res.get('immediate_support', 0.0):.2f}</b>
+                </div>
+                <div id="chart-container"></div>
+            </div>
+            <script>
+                const container = document.getElementById('chart-container');
+                const chart = LightweightCharts.createChart(container, {{
+                    layout: {{ background: {{ color: 'transparent' }}, textColor: '#94A3B8' }},
+                    grid: {{ vertLines: {{ color: '#131B2E' }}, horzLines: {{ color: '#131B2E' }} }},
+                    crosshair: {{ mode: LightweightCharts.CrosshairMode.Normal }},
+                    rightPriceScale: {{ borderColor: '#1E293B', scaleMargins: {{ top: 0.1, bottom: 0.1 }} }},
+                    timeScale: {{ borderColor: '#1E293B', fixLeftEdge: false, rightOffset: 12 }}
+                }});
+
+                const candleSeries = chart.addCandlestickSeries({{
+                    upColor: '#00E676', downColor: '#FF5252', borderVisible: false,
+                    wickUpColor: '#00E676', wickDownColor: '#FF5252'
+                }});
+                const rawCandles = {json.dumps(candles_data)};
+                candleSeries.setData(rawCandles);
+
+                // 1. 標註 Major Support (大級別重大支撐底線 - 粗青色線)
+                const majorSup = {tech_res.get('major_support', 0.0)};
+                if (majorSup > 0) {{
+                    candleSeries.createPriceLine({{
+                        price: majorSup, color: '#06B6D4', lineWidth: 2, lineStyle: LightweightCharts.LineStyle.Solid,
+                        axisLabelVisible: true, title: `⭐ MAJOR SUPPORT: $${{majorSup.toFixed(2)}}`
+                    }});
+                }}
+
+                // 2. 標註即時 S/R 水平線
+                const immRes = {tech_res.get('immediate_resistance', 0.0)};
+                const immSup = {tech_res.get('immediate_support', 0.0)};
+                if (immRes > 0) {{
+                    candleSeries.createPriceLine({{
+                        price: immRes, color: '#FF5252', lineWidth: 1, lineStyle: LightweightCharts.LineStyle.Dashed,
+                        axisLabelVisible: true, title: `RES: $${{immRes.toFixed(2)}}`
+                    }});
+                }}
+                if (immSup > 0) {{
+                    candleSeries.createPriceLine({{
+                        price: immSup, color: '#00E676', lineWidth: 1, lineStyle: LightweightCharts.LineStyle.Dashed,
+                        axisLabelVisible: true, title: `SUP: $${{immSup.toFixed(2)}}`
+                    }});
+                }}
+
+                // 3. 繪製 Trendlines (基礎趨勢線)
+                const tLines = {json.dumps(tech_res.get('trend_lines', []))};
+                tLines.forEach(line => {{
+                    const lineSeries = chart.addLineSeries({{
+                        color: line.color, lineWidth: 2, lineStyle: LightweightCharts.LineStyle.Solid,
+                        crosshairMarkerVisible: false
+                    }});
+                    lineSeries.setData([
+                        {{ time: line.from_time.split(' ')[0], value: line.from_price }},
+                        {{ time: line.to_time.split(' ')[0], value: line.to_price }}
+                    ]);
+                }});
+
+                // 4. 繪製 Trend Channels (平行通道線)
+                const cLines = {json.dumps(tech_res.get('channel_lines', []))};
+                cLines.forEach(line => {{
+                    const channelSeries = chart.addLineSeries({{
+                        color: line.color, lineWidth: 2, lineStyle: LightweightCharts.LineStyle.Dashed,
+                        crosshairMarkerVisible: false
+                    }});
+                    channelSeries.setData([
+                        {{ time: line.from_time.split(' ')[0], value: line.from_price }},
+                        {{ time: line.to_time.split(' ')[0], value: line.to_price }}
+                    ]);
+                }});
+
+                chart.timeScale().fitContent();
+            </script>
+        </body>
+        </html>
+        """
+        components.html(html_code, height=620, scrolling=False)
+
+    except Exception as e:
+        st.error(f"❌ 雷達日線渲染異常: {str(e)}")
+
+def render_macro_radar_view(assets):
+    st.markdown("### 📡 12 檔核心宏觀雷達 · 純日線技術幾何畫布")
+    
+    code_list = [a['code'] for a in assets]
+    col1, col2 = st.columns([3, 2])
+    with col1:
+        sel_code = st.selectbox("🎯 選擇穿透標的", code_list, index=0, key="macro_radar_code_select")
+    with col2:
+        bars_count = st.slider("📅 歷史日 K 深度", min_value=100, max_value=500, value=300, step=50, key="macro_radar_bars_slider")
+
+    # 渲染純日線圖
+    render_murphy_daily_chart(sel_code, bars_count=bars_count)
