@@ -1,5 +1,5 @@
 # 文件名: data_engine.py
-# 職責: 全時段 5M 歷史落盤 + 自動自癒補齊 (Auto-Heal) + 1H 重採樣 + 實盤持倉查詢 + 雙軌日誌
+# 职责: 完整抓取 04:00~20:00 美股全时段 5M 历史与实时数据 + 1H 本地重采样 + 持仓查询 + 状态日志
 
 import os
 import time
@@ -16,7 +16,6 @@ WATCHLIST_PATH = os.path.join(BASE_DIR, "watchlist.json")
 LOG_PATH = os.path.join(BASE_DIR, "system_health.log")
 os.makedirs(DATA_DIR, exist_ok=True)
 
-# 配置系統日誌
 logging.basicConfig(
     filename=LOG_PATH,
     level=logging.INFO,
@@ -34,7 +33,6 @@ def log_event(msg: str, level: str = "INFO"):
         logging.info(msg)
 
 def get_active_session_info():
-    """判定當前美東時段狀態"""
     now_ny = datetime.datetime.now(tz_ny)
     weekday = now_ny.weekday()
     cur_t = now_ny.time()
@@ -65,7 +63,6 @@ def safe_float(val, default=0.0):
         return default
 
 def resample_5m_to_1h(df_5m: pd.DataFrame) -> pd.DataFrame:
-    """5M 自動聚合為 1H"""
     if df_5m is None or df_5m.empty:
         return pd.DataFrame()
     df = df_5m.copy()
@@ -119,46 +116,34 @@ class MarketDataHub:
             json.dump({"assets": assets_list}, f, ensure_ascii=False, indent=2)
 
     def auto_heal_today_data(self, code: str):
-        """【真·全時段補漏】拉取包含盤前 04:00 的全量 5M 並重採樣 1H"""
+        """拉取 04:00 至今包含盤前的全時段 5M 數據並重採樣 1H"""
         ctx = self.get_context()
         if ctx is None:
             return False, "OpenD 離線"
 
         try:
-            from moomoo import KLType, AuType, SubType, RET_OK
+            from moomoo import KLType, AuType, RET_OK
             now_ny = datetime.datetime.now(tz_ny)
             start_str = (now_ny - datetime.timedelta(days=7)).strftime("%Y-%m-%d")
             end_str = now_ny.strftime("%Y-%m-%d")
 
-            # 1. 訂閱 5M 實時流
-            ctx.subscribe([code], [SubType.K_5M])
-
-            # 2. 獲取最近 500 根 5M (覆蓋過去數天全時段盤前盤後)
-            ret_cur, df_cur = ctx.get_cur_kline(code, 500, KLType.K_5M, AuType.NONE)
-
-            # 3. 獲取歷史連續 5M
-            ret_hist, df_hist, _ = ctx.request_history_kline(
+            ret, df_hist, msg = ctx.request_history_kline(
                 code=code,
                 start=start_str,
                 end=end_str,
                 ktype=KLType.K_5M,
                 autype=AuType.NONE,
-                max_count=1000
+                max_count=1000,
+                extended_time=True
             )
 
-            dfs_to_merge = []
-            if ret_hist == RET_OK and not df_hist.empty:
-                dfs_to_merge.append(df_hist)
-            if ret_cur == RET_OK and not df_cur.empty:
-                dfs_to_merge.append(df_cur)
+            if ret != RET_OK or df_hist.empty:
+                log_event(f"[Auto-Heal 失敗] 無法獲取 {code} 全時段數據: {msg}", "WARNING")
+                return False, f"獲取失敗: {msg}"
 
-            if not dfs_to_merge:
-                log_event(f"[Auto-Heal 失敗] 無法獲取 {code} 全時段數據", "WARNING")
-                return False, "數據為空"
-
-            df_all = pd.concat(dfs_to_merge, ignore_index=True)
-            df_all.columns = [c.lower().strip() for c in df_all.columns]
-            df_final = df_all.drop_duplicates(subset=['time_key']).sort_values('time_key').reset_index(drop=True)
+            df_final = df_hist.copy()
+            df_final.columns = [c.lower().strip() for c in df_final.columns]
+            df_final = df_final.drop_duplicates(subset=['time_key']).sort_values('time_key').reset_index(drop=True)
 
             clean_name = code.replace(".", "_")
             csv_path_5m = os.path.join(DATA_DIR, f"{clean_name}_5M.csv")
@@ -193,7 +178,6 @@ class MarketDataHub:
 hub_engine = MarketDataHub()
 
 def get_moomoo_real_portfolio(host='127.0.0.1', port=11111):
-    """查詢真實賬戶資金與持倉"""
     try:
         from moomoo import OpenSecTradeContext, TrdMarket, TrdEnv, Currency, RET_OK
         trd_ctx = OpenSecTradeContext(filter_trdmarket=TrdMarket.NONE, host=host, port=port)
