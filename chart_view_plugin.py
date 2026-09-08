@@ -1,5 +1,5 @@
 # 文件名: chart_view_plugin.py
-# 职责: 渲染专业富途风格图表 (自适应 Bar-Width 全时段遮罩 + MYT 大马时区 + 全景 Trading Info + High/Low 标线)
+# 職責: 渲染富途牛牛風格圖表 (對齊 MYT 大馬時間 + 全景 Trading Info 懸浮窗 + High/Low 標註 + 全時段遮罩 + 提供 render_chart_view 入口)
 
 import os
 import datetime
@@ -48,14 +48,14 @@ def render_lightweight_tv_chart(code: str, ktype_str: str = "5M", bars_count: in
     csv_path = os.path.join(DATA_DIR, f"{clean_name}_{ktype_str}.csv")
 
     if not os.path.exists(csv_path):
-        st.warning(f"⚪ 正在为 {code} 加载数据...")
+        st.warning(f"⚪ 正在為 {code} 加載數據...")
         return
 
     try:
         df = pd.read_csv(csv_path)
         df.columns = [c.lower().strip() for c in df.columns]
         if df.empty or 'time_key' not in df.columns:
-            st.warning(f"⚪ {code} 数据为空。")
+            st.warning(f"⚪ {code} 數據為空。")
             return
 
         df['dt'] = pd.to_datetime(df['time_key'])
@@ -82,9 +82,8 @@ def render_lightweight_tv_chart(code: str, ktype_str: str = "5M", bars_count: in
             time_str_myt = dt_myt.strftime('%Y-%m-%d %H:%M')
 
             t_ny = row['dt'].time()
-            # 扩展时段判定：美东 04:00~09:30 (盘前) 与 16:00~20:00 (盘后)
             is_ext = (datetime.time(4, 0) <= t_ny < datetime.time(9, 30)) or (datetime.time(16, 0) <= t_ny <= datetime.time(20, 0))
-            session_label = "🟡 盘前 (PM)" if datetime.time(4, 0) <= t_ny < datetime.time(9, 30) else ("🔵 盘后 (AH)" if datetime.time(16, 0) <= t_ny <= datetime.time(20, 0) else "🟢 常规盘 (RTH)")
+            session_label = "🟡 盤前 (PM)" if datetime.time(4, 0) <= t_ny < datetime.time(9, 30) else ("🔵 盤後 (AH)" if datetime.time(16, 0) <= t_ny <= datetime.time(20, 0) else "🟢 常規盤 (RTH)")
 
             chg_pct = ((c - o) / o * 100.0) if o > 0 else 0.0
 
@@ -137,7 +136,7 @@ def render_lightweight_tv_chart(code: str, ktype_str: str = "5M", bars_count: in
         </head>
         <body>
             <div id="wrapper">
-                <div id="trading-info">📅 悬停查看具体 K 线 Trading Info 与 OHLC (MYT)</div>
+                <div id="trading-info">📅 懸停查看具體 K 線 Trading Info 與 OHLC (MYT)</div>
                 <canvas id="shading-canvas"></canvas>
                 <div id="chart-container"></div>
             </div>
@@ -194,7 +193,7 @@ def render_lightweight_tv_chart(code: str, ktype_str: str = "5M", bars_count: in
                 const rawVolumes = {json.dumps(volume_data)};
                 volumeSeries.setData(rawVolumes);
 
-                // High / Low 水平标线
+                // High / Low 水平標線
                 const winHigh = {window_high};
                 const winLow = {window_low};
                 if (winHigh > 0) {{
@@ -210,7 +209,7 @@ def render_lightweight_tv_chart(code: str, ktype_str: str = "5M", bars_count: in
                     }});
                 }}
 
-                // 攻防水平线
+                // 攻防水平線
                 const pmh = {metrics['pmh']}; const pml = {metrics['pml']};
                 const pdh = {metrics['pdh']}; const pdl = {metrics['pdl']};
                 const ema = {metrics['ema20_1h']};
@@ -230,7 +229,7 @@ def render_lightweight_tv_chart(code: str, ktype_str: str = "5M", bars_count: in
                     const volStr = Number(meta.volume || 0).toLocaleString();
                     tradingInfo.innerHTML = `
                         <b>📅 ${{meta.time_str_myt}} MYT</b> &nbsp;|&nbsp; <b>${{meta.session_label}}</b><br/>
-                        开: <b>$${{data.open.toFixed(2)}}</b> &nbsp;
+                        開: <b>$${{data.open.toFixed(2)}}</b> &nbsp;
                         高: <b style="color:#F43F5E;">$${{data.high.toFixed(2)}}</b> &nbsp;
                         低: <b style="color:#10B981;">$${{data.low.toFixed(2)}}</b> &nbsp;
                         收: <b style="color:${{color}};">$${{data.close.toFixed(2)}}</b> (${{chgStr}}) &nbsp;|&nbsp;
@@ -256,14 +255,12 @@ def render_lightweight_tv_chart(code: str, ktype_str: str = "5M", bars_count: in
                     updateHUD(meta, data);
                 }});
 
-                // 核心修复：自动根据单根蜡烛宽度 (Bar-Width) 完整铺设 Extended Hours 遮罩
                 function drawExtendedShading() {{
                     resizeCanvas();
                     ctx.clearRect(0, 0, canvas.width, canvas.height);
                     const timeScale = chart.timeScale();
                     if (rawCandles.length < 2) return;
 
-                    // 计算当前屏幕上一根 K 线的实际平均像素跨度
                     const c0 = timeScale.timeToCoordinate(rawCandles[0].time);
                     const c1 = timeScale.timeToCoordinate(rawCandles[1].time);
                     const singleBarWidth = (c0 !== null && c1 !== null) ? Math.max(Math.abs(c1 - c0), 6) : 8;
@@ -303,5 +300,19 @@ def render_lightweight_tv_chart(code: str, ktype_str: str = "5M", bars_count: in
         </html>
         """
         components.html(html_code, height=580, scrolling=False)
+
     except Exception as e:
-        st.error(f"❌ 图表渲染异常: {str(e)}")
+        st.error(f"❌ 圖表渲染異常: {str(e)}")
+
+def render_chart_view(assets):
+    """供 12 檔宏觀雷達與外部插件呼叫的圖表穿透選單入口"""
+    code_list = [a['code'] for a in assets]
+    c1, c2, c3 = st.columns([3, 2, 2])
+    with c1:
+        sel_code = st.selectbox("選擇穿透標的", code_list, index=0, key="chart_plugin_code_sel")
+    with c2:
+        sel_ktype = st.selectbox("選擇週期", ["5M", "1H", "DAY"], index=0, key="chart_plugin_ktype_sel")
+    with c3:
+        sel_bars = st.slider("顯示柱數", 30, 300, 120, step=10, key="chart_plugin_bars_sel")
+
+    render_lightweight_tv_chart(sel_code, sel_ktype, sel_bars)
