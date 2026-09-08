@@ -1,5 +1,5 @@
 # 文件名: data_engine.py
-# 职责: 独立 Market Data Hub 底层数据引擎 (深度历史落盘 + 换棒整点自动增量追加 + 毫秒 Forming Bar 动态合成)
+# 职责: 独立 Market Data Hub 底层数据引擎 + Moomoo 真实账户持仓资金接口
 
 import os
 import time
@@ -40,14 +40,19 @@ class MarketDataHub:
                     return json.load(f).get("assets", [])
             except Exception:
                 pass
-        return []
+        return [
+            {"code": "US.QQQ", "name": "纳指100 ETF", "category": "🚀 核心指数", "type": "STOCK"},
+            {"code": "US.SPY", "name": "标普500 ETF", "category": "🚀 核心指数", "type": "STOCK"},
+            {"code": "US.NVDA", "name": "英伟达", "category": "🏛️ 科技巨头", "type": "STOCK"},
+            {"code": "CC.BTCUSD", "name": "比特币现货", "category": "🪙 加密资产", "type": "CRYPTO"}
+        ]
 
     def save_watchlist(self, assets_list):
         with open(WATCHLIST_PATH, "w", encoding="utf-8") as f:
             json.dump({"assets": assets_list}, f, ensure_ascii=False, indent=2)
 
     def fetch_deep_history(self, code: str, ktype_str: str = "DAY", days_back: int = 730):
-        """深度历史分页拉取并落盘"""
+        """拉取深度历史数据并落盘"""
         ctx = self.get_context()
         if ctx is None:
             return None, "OpenD 未连线"
@@ -101,7 +106,7 @@ class MarketDataHub:
             return None, str(e)
 
     def sync_latest_closed_bar(self, code: str, ktype_str: str = "5M"):
-        """换棒时轻量同步最近 1~2 根已收盘定格柱并追加写入本地 CSV"""
+        """换棒时增量同步最新定格柱"""
         ctx = self.get_context()
         if ctx is None:
             return None
@@ -151,4 +156,52 @@ class MarketDataHub:
             pass
         return None
 
+# 单例导出
 hub_engine = MarketDataHub()
+
+
+# -------------------------------------------------------------
+# Moomoo 实盘账户与持仓接口 (供 Tab 2 持仓罗盘直接调用)
+# -------------------------------------------------------------
+def get_moomoo_real_portfolio(host='127.0.0.1', port=11111):
+    """
+    通过 OpenD 获取当前登录账户的资金及持仓明细
+    """
+    try:
+        from moomoo import OpenSecTradeContext, TrdMarket, TrdEnv, Currency, RET_OK
+        trd_ctx = OpenSecTradeContext(filter_trdmarket=TrdMarket.NONE, host=host, port=port)
+        ret_acc, acc_list = trd_ctx.get_acc_list()
+        
+        if ret_acc != RET_OK or acc_list.empty:
+            trd_ctx.close()
+            return None, None, f"获取账户列表失败: {acc_list}"
+            
+        real_accs = acc_list[acc_list['trd_env'] == 'REAL']
+        target_acc = real_accs.iloc[0] if not real_accs.empty else acc_list.iloc[0]
+        trd_env = TrdEnv.REAL if not real_accs.empty else TrdEnv.SIMULATE
+        target_acc_id = int(target_acc['acc_id'])
+        
+        # 1. 资金
+        ret_funds, df_funds = trd_ctx.accinfo_query(trd_env=trd_env, acc_id=target_acc_id, currency=Currency.USD)
+        fund_summary = {}
+        if ret_funds == RET_OK and not df_funds.empty:
+            row = df_funds.iloc[0]
+            fund_summary = {
+                'total_assets': float(row.get('total_assets', 0.0) or 0.0),
+                'cash': float(row.get('cash', 0.0) or 0.0),
+                'market_val': float(row.get('market_val', 0.0) or 0.0),
+                'unrealized_pl': float(row.get('unrealized_pl', 0.0) or 0.0),
+                'acc_id': str(target_acc_id),
+                'trd_env': 'REAL' if trd_env == TrdEnv.REAL else 'SIMULATE'
+            }
+            
+        # 2. 持仓
+        ret_pos, df_pos = trd_ctx.position_list_query(trd_env=trd_env, acc_id=target_acc_id)
+        pos_df = pd.DataFrame()
+        if ret_pos == RET_OK and not df_pos.empty:
+            pos_df = df_pos.copy()
+            
+        trd_ctx.close()
+        return fund_summary, pos_df, "OK"
+    except Exception as e:
+        return None, None, str(e)
