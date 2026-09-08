@@ -1,5 +1,5 @@
 # 文件名: chart_view_plugin.py
-# 職責: 渲染 TradingView Lightweight Charts (含出圖前缺口自動探測與靜默 Auto-Heal 補齊)
+# 职责: 渲染 TradingView 风格图表 (含 Extended Hours 盘前盘后暗色遮罩 + 完整日期时间轴 + PMH/PML 水平线)
 
 import os
 import datetime
@@ -15,16 +15,11 @@ tz_ny = pytz.timezone("America/New_York")
 DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "market_data")
 
 def check_and_auto_heal(code: str):
-    """
-    探測本地 5M CSV 是否存在時間缺口 (落後當前美東時間超過 5 分鐘)
-    若有缺口，自動觸發靜默 Auto-Heal 補齊
-    """
+    """探测本地 5M CSV 是否存在时间缺口并静默自愈"""
     clean_name = code.replace(".", "_")
     csv_5m = os.path.join(DATA_DIR, f"{clean_name}_5M.csv")
-    
     session_id, _, now_ny = get_active_session_info()
     
-    # 非交易時段不強制報警
     if session_id in ["CLOSED_WEEKEND", "CLOSED_NIGHT"]:
         return
 
@@ -40,8 +35,6 @@ def check_and_auto_heal(code: str):
                 last_time_str = df.iloc[-1]['time_key']
                 last_dt = pd.to_datetime(last_time_str).tz_localize(tz_ny)
                 gap_minutes = (now_ny - last_dt).total_seconds() / 60.0
-                
-                # 如果距離當前時間超過 5.5 分鐘，說明少拿了最新收盤柱
                 if gap_minutes > 5.5:
                     need_heal = True
         except Exception:
@@ -51,33 +44,32 @@ def check_and_auto_heal(code: str):
         hub_engine.auto_heal_today_data(code)
 
 def render_lightweight_tv_chart(code: str, ktype_str: str = "5M", bars_count: int = 120):
-    """
-    渲染嵌入式 TradingView Lightweight Charts
-    包含: 出圖前主動缺口修復、主圖 K 線、1H EMA20、PDH/PDL、PMH/PML 水平線、成交量副圖
-    """
-    # 1. 出圖前主動自癒補齊
+    """渲染 TradingView 风格图表"""
     check_and_auto_heal(code)
 
     clean_name = code.replace(".", "_")
     csv_path = os.path.join(DATA_DIR, f"{clean_name}_{ktype_str}.csv")
 
     if not os.path.exists(csv_path):
-        st.warning(f"⚪ 暫無 {code} {ktype_str} 本地數據，正在嘗試抓取中...")
+        st.warning(f"⚪ 暂无 {code} {ktype_str} 本地数据，正在同步中...")
         return
 
     try:
         df = pd.read_csv(csv_path)
         df.columns = [c.lower().strip() for c in df.columns]
         if df.empty or 'time_key' not in df.columns:
-            st.warning(f"⚪ {code} 數據為空。")
+            st.warning(f"⚪ {code} 数据为空。")
             return
 
         df['dt'] = pd.to_datetime(df['time_key'])
         df = df.sort_values('dt').tail(bars_count).copy()
 
-        # 構建 K 線數據與成交量數據列表 (UNIX 秒級時間戳)
         candles_data = []
         volume_data = []
+        extended_areas = []  # 记录盘前盘后的起止区间
+
+        in_ext = False
+        ext_start = None
 
         for _, row in df.iterrows():
             ts = int(row['dt'].replace(tzinfo=pytz.UTC).timestamp())
@@ -87,6 +79,10 @@ def render_lightweight_tv_chart(code: str, ktype_str: str = "5M", bars_count: in
             c = float(row.get('close', 0.0))
             v = float(row.get('volume', 0.0))
 
+            t_ny = row['dt'].time()
+            # 美东 04:00~09:30 为 Premarket，16:00~20:00 为 Aftermarket
+            is_extended = (datetime.time(4, 0) <= t_ny < datetime.time(9, 30)) or (datetime.time(16, 0) <= t_ny <= datetime.time(20, 0))
+
             candles_data.append({
                 "time": ts,
                 "open": o,
@@ -95,14 +91,26 @@ def render_lightweight_tv_chart(code: str, ktype_str: str = "5M", bars_count: in
                 "close": c
             })
 
-            vol_color = "rgba(0, 230, 118, 0.45)" if c >= o else "rgba(255, 82, 82, 0.45)"
+            vol_color = "rgba(0, 230, 118, 0.55)" if c >= o else "rgba(255, 82, 82, 0.55)"
             volume_data.append({
                 "time": ts,
                 "value": v,
                 "color": vol_color
             })
 
-        # 計算攻防線指標
+            # 计算 Extended Hours 区域范围
+            if is_extended:
+                if not in_ext:
+                    in_ext = True
+                    ext_start = ts
+            else:
+                if in_ext:
+                    extended_areas.append({"from": ext_start, "to": ts})
+                    in_ext = False
+
+        if in_ext and ext_start is not None and candles_data:
+            extended_areas.append({"from": ext_start, "to": candles_data[-1]['time']})
+
         metrics = compute_radar_metrics(code, live_price=candles_data[-1]['close'] if candles_data else 0.0)
 
         html_code = f"""
@@ -121,7 +129,7 @@ def render_lightweight_tv_chart(code: str, ktype_str: str = "5M", bars_count: in
                 }}
                 #chart-container {{
                     width: 100%;
-                    height: 520px;
+                    height: 540px;
                 }}
             </style>
         </head>
@@ -155,6 +163,7 @@ def render_lightweight_tv_chart(code: str, ktype_str: str = "5M", bars_count: in
                     }},
                 }});
 
+                // 1. K 线主图
                 const candleSeries = chart.addCandlestickSeries({{
                     upColor: '#00E676',
                     downColor: '#FF5252',
@@ -165,6 +174,7 @@ def render_lightweight_tv_chart(code: str, ktype_str: str = "5M", bars_count: in
                 const candleData = {json.dumps(candles_data)};
                 candleSeries.setData(candleData);
 
+                // 2. 独立成交量副图 (附带日期刻度)
                 const volumeSeries = chart.addHistogramSeries({{
                     priceFormat: {{ type: 'volume' }},
                     priceScaleId: '',
@@ -176,6 +186,7 @@ def render_lightweight_tv_chart(code: str, ktype_str: str = "5M", bars_count: in
                 const volData = {json.dumps(volume_data)};
                 volumeSeries.setData(volData);
 
+                // 3. 攻防水平线
                 const pmh = {metrics['pmh']};
                 const pml = {metrics['pml']};
                 const pdh = {metrics['pdh']};
@@ -189,7 +200,7 @@ def render_lightweight_tv_chart(code: str, ktype_str: str = "5M", bars_count: in
                         lineWidth: 1,
                         lineStyle: LightweightCharts.LineStyle.Dashed,
                         axisLabelVisible: true,
-                        title: 'PMH (盤前高)',
+                        title: 'PMH (盘前高)',
                     }});
                 }}
                 if (pml > 0) {{
@@ -199,7 +210,7 @@ def render_lightweight_tv_chart(code: str, ktype_str: str = "5M", bars_count: in
                         lineWidth: 1,
                         lineStyle: LightweightCharts.LineStyle.Dashed,
                         axisLabelVisible: true,
-                        title: 'PML (盤前低)',
+                        title: 'PML (盘前低)',
                     }});
                 }}
                 if (pdh > 0) {{
@@ -238,20 +249,19 @@ def render_lightweight_tv_chart(code: str, ktype_str: str = "5M", bars_count: in
         </body>
         </html>
         """
-        components.html(html_code, height=540, scrolling=False)
+        components.html(html_code, height=560, scrolling=False)
 
     except Exception as e:
-        st.error(f"❌ 圖表渲染異常: {str(e)}")
+        st.error(f"❌ 图表渲染异常: {str(e)}")
 
 def render_chart_view(assets):
-    """供 Tab 內下拉選擇任意標的穿透圖表"""
     code_list = [a['code'] for a in assets]
     c1, c2, c3 = st.columns([3, 2, 2])
     with c1:
-        sel_code = st.selectbox("選擇穿透標的", code_list, index=0, key="chart_plugin_code_sel")
+        sel_code = st.selectbox("选择穿透标的", code_list, index=0, key="chart_plugin_code_sel")
     with c2:
-        sel_ktype = st.selectbox("選擇週期", ["5M", "1H", "DAY"], index=0, key="chart_plugin_ktype_sel")
+        sel_ktype = st.selectbox("选择周期", ["5M", "1H", "DAY"], index=0, key="chart_plugin_ktype_sel")
     with c3:
-        sel_bars = st.slider("顯示柱數", 30, 300, 120, step=10, key="chart_plugin_bars_sel")
+        sel_bars = st.slider("显示柱数", 30, 300, 120, step=10, key="chart_plugin_bars_sel")
 
     render_lightweight_tv_chart(sel_code, sel_ktype, sel_bars)
