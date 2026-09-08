@@ -1,5 +1,5 @@
 # 文件名: data_engine.py
-# 职责: 独立 Market Data Hub 底层数据引擎 + Moomoo 真实账户持仓资金接口
+# 职责: 独立 Market Data Hub 底层数据引擎 + Moomoo 真实账户持仓与资金接口 (含 N/A 防崩清洗)
 
 import os
 import time
@@ -13,6 +13,20 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.join(BASE_DIR, "market_data")
 WATCHLIST_PATH = os.path.join(BASE_DIR, "watchlist.json")
 os.makedirs(DATA_DIR, exist_ok=True)
+
+def safe_float(val, default=0.0):
+    """安全转换浮点数，自动过滤 'N/A'、None 或非法字符"""
+    if val is None or pd.isna(val):
+        return default
+    if isinstance(val, (int, float)):
+        return float(val)
+    val_str = str(val).strip().replace(",", "").replace("$", "").replace("%", "")
+    if val_str.upper() in ["N/A", "NA", "NONE", "--", "NULL", ""]:
+        return default
+    try:
+        return float(val_str)
+    except Exception:
+        return default
 
 class MarketDataHub:
     _instance = None
@@ -161,7 +175,7 @@ hub_engine = MarketDataHub()
 
 
 # -------------------------------------------------------------
-# Moomoo 实盘账户与持仓接口 (供 Tab 2 持仓罗盘直接调用)
+# Moomoo 实盘账户与持仓接口 (含全字段 safe_float 保护)
 # -------------------------------------------------------------
 def get_moomoo_real_portfolio(host='127.0.0.1', port=11111):
     """
@@ -181,16 +195,16 @@ def get_moomoo_real_portfolio(host='127.0.0.1', port=11111):
         trd_env = TrdEnv.REAL if not real_accs.empty else TrdEnv.SIMULATE
         target_acc_id = int(target_acc['acc_id'])
         
-        # 1. 资金
+        # 1. 资金 (加入 safe_float 防崩保护)
         ret_funds, df_funds = trd_ctx.accinfo_query(trd_env=trd_env, acc_id=target_acc_id, currency=Currency.USD)
         fund_summary = {}
         if ret_funds == RET_OK and not df_funds.empty:
             row = df_funds.iloc[0]
             fund_summary = {
-                'total_assets': float(row.get('total_assets', 0.0) or 0.0),
-                'cash': float(row.get('cash', 0.0) or 0.0),
-                'market_val': float(row.get('market_val', 0.0) or 0.0),
-                'unrealized_pl': float(row.get('unrealized_pl', 0.0) or 0.0),
+                'total_assets': safe_float(row.get('total_assets')),
+                'cash': safe_float(row.get('cash')),
+                'market_val': safe_float(row.get('market_val')),
+                'unrealized_pl': safe_float(row.get('unrealized_pl')),
                 'acc_id': str(target_acc_id),
                 'trd_env': 'REAL' if trd_env == TrdEnv.REAL else 'SIMULATE'
             }
@@ -200,6 +214,10 @@ def get_moomoo_real_portfolio(host='127.0.0.1', port=11111):
         pos_df = pd.DataFrame()
         if ret_pos == RET_OK and not df_pos.empty:
             pos_df = df_pos.copy()
+            # 持仓中的数值列也做安全转换
+            for col in ['cost_price', 'nominal_price', 'market_val', 'pl_val', 'pl_ratio', 'qty', 'can_sell_qty']:
+                if col in pos_df.columns:
+                    pos_df[col] = pos_df[col].apply(safe_float)
             
         trd_ctx.close()
         return fund_summary, pos_df, "OK"
