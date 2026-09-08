@@ -1,5 +1,5 @@
 # 文件名: chart_view_plugin.py
-# 職責: 渲染富途牛牛風格圖表 (對齊 MYT 大馬時間 + 全景 Trading Info 懸浮窗 + 最高最低價 High/Low 標註 + 攻防線)
+# 职责: 渲染专业富途风格图表 (自适应 Bar-Width 全时段遮罩 + MYT 大马时区 + 全景 Trading Info + High/Low 标线)
 
 import os
 import datetime
@@ -48,14 +48,14 @@ def render_lightweight_tv_chart(code: str, ktype_str: str = "5M", bars_count: in
     csv_path = os.path.join(DATA_DIR, f"{clean_name}_{ktype_str}.csv")
 
     if not os.path.exists(csv_path):
-        st.warning(f"⚪ 正在為 {code} 加載數據...")
+        st.warning(f"⚪ 正在为 {code} 加载数据...")
         return
 
     try:
         df = pd.read_csv(csv_path)
         df.columns = [c.lower().strip() for c in df.columns]
         if df.empty or 'time_key' not in df.columns:
-            st.warning(f"⚪ {code} 數據為空。")
+            st.warning(f"⚪ {code} 数据为空。")
             return
 
         df['dt'] = pd.to_datetime(df['time_key'])
@@ -66,8 +66,6 @@ def render_lightweight_tv_chart(code: str, ktype_str: str = "5M", bars_count: in
 
         window_high = -999999.0
         window_low = 999999.0
-        high_bar_time = None
-        low_bar_time = None
 
         for _, row in df.iterrows():
             ts = int(row['dt'].replace(tzinfo=pytz.UTC).timestamp())
@@ -77,20 +75,16 @@ def render_lightweight_tv_chart(code: str, ktype_str: str = "5M", bars_count: in
             c = float(row.get('close', 0.0))
             v = float(row.get('volume', 0.0))
 
-            if h > window_high:
-                window_high = h
-                high_bar_time = ts
-            if l < window_low and l > 0:
-                window_low = l
-                low_bar_time = ts
+            if h > window_high: window_high = h
+            if l < window_low and l > 0: window_low = l
 
-            # 轉換為大馬時間文字
             dt_myt = row['dt'].tz_localize(tz_ny).tz_convert('Asia/Kuala_Lumpur')
             time_str_myt = dt_myt.strftime('%Y-%m-%d %H:%M')
 
             t_ny = row['dt'].time()
+            # 扩展时段判定：美东 04:00~09:30 (盘前) 与 16:00~20:00 (盘后)
             is_ext = (datetime.time(4, 0) <= t_ny < datetime.time(9, 30)) or (datetime.time(16, 0) <= t_ny <= datetime.time(20, 0))
-            session_label = "🟡 盤前 (PM)" if datetime.time(4, 0) <= t_ny < datetime.time(9, 30) else ("🔵 盤後 (AH)" if datetime.time(16, 0) <= t_ny <= datetime.time(20, 0) else "🟢 常規盤 (RTH)")
+            session_label = "🟡 盘前 (PM)" if datetime.time(4, 0) <= t_ny < datetime.time(9, 30) else ("🔵 盘后 (AH)" if datetime.time(16, 0) <= t_ny <= datetime.time(20, 0) else "🟢 常规盘 (RTH)")
 
             chg_pct = ((c - o) / o * 100.0) if o > 0 else 0.0
 
@@ -134,7 +128,7 @@ def render_lightweight_tv_chart(code: str, ktype_str: str = "5M", bars_count: in
                 #trading-info {{
                     position: absolute; top: 8px; left: 12px; z-index: 10;
                     font-size: 12.5px; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-                    background: rgba(15, 23, 42, 0.90); padding: 6px 14px; border-radius: 6px;
+                    background: rgba(15, 23, 42, 0.92); padding: 6px 14px; border-radius: 6px;
                     border: 1px solid #1E293B; pointer-events: none; line-height: 1.5;
                 }}
                 #shading-canvas {{ position: absolute; top: 0; left: 0; width: 100%; height: 560px; pointer-events: none; z-index: 1; }}
@@ -143,7 +137,7 @@ def render_lightweight_tv_chart(code: str, ktype_str: str = "5M", bars_count: in
         </head>
         <body>
             <div id="wrapper">
-                <div id="trading-info">📅 懸停查看具體 K 線 Trading Info 與 OHLC (MYT)</div>
+                <div id="trading-info">📅 悬停查看具体 K 线 Trading Info 与 OHLC (MYT)</div>
                 <canvas id="shading-canvas"></canvas>
                 <div id="chart-container"></div>
             </div>
@@ -159,7 +153,6 @@ def render_lightweight_tv_chart(code: str, ktype_str: str = "5M", bars_count: in
                 }}
                 resizeCanvas();
 
-                // 核心：時間軸對齊馬來西亞時間 (MYT = UTC+8)
                 const chart = LightweightCharts.createChart(container, {{
                     layout: {{ background: {{ color: 'transparent' }}, textColor: '#94A3B8' }},
                     grid: {{ vertLines: {{ color: '#131B2E' }}, horzLines: {{ color: '#131B2E' }} }},
@@ -201,31 +194,23 @@ def render_lightweight_tv_chart(code: str, ktype_str: str = "5M", bars_count: in
                 const rawVolumes = {json.dumps(volume_data)};
                 volumeSeries.setData(rawVolumes);
 
-                // 標註當前視圖中的最高價 (High) 與 最低價 (Low)
+                // High / Low 水平标线
                 const winHigh = {window_high};
                 const winLow = {window_low};
                 if (winHigh > 0) {{
                     candleSeries.createPriceLine({{
-                        price: winHigh,
-                        color: '#F43F5E',
-                        lineWidth: 1,
-                        lineStyle: LightweightCharts.LineStyle.Dotted,
-                        axisLabelVisible: true,
-                        title: `HIGH: ${{winHigh.toFixed(2)}}`
+                        price: winHigh, color: '#F43F5E', lineWidth: 1, lineStyle: LightweightCharts.LineStyle.Dotted,
+                        axisLabelVisible: true, title: `HIGH: ${{winHigh.toFixed(2)}}`
                     }});
                 }}
                 if (winLow < 999999 && winLow > 0) {{
                     candleSeries.createPriceLine({{
-                        price: winLow,
-                        color: '#10B981',
-                        lineWidth: 1,
-                        lineStyle: LightweightCharts.LineStyle.Dotted,
-                        axisLabelVisible: true,
-                        title: `LOW: ${{winLow.toFixed(2)}}`
+                        price: winLow, color: '#10B981', lineWidth: 1, lineStyle: LightweightCharts.LineStyle.Dotted,
+                        axisLabelVisible: true, title: `LOW: ${{winLow.toFixed(2)}}`
                     }});
                 }}
 
-                // 攻防線
+                // 攻防水平线
                 const pmh = {metrics['pmh']}; const pml = {metrics['pml']};
                 const pdh = {metrics['pdh']}; const pdl = {metrics['pdl']};
                 const ema = {metrics['ema20_1h']};
@@ -245,7 +230,7 @@ def render_lightweight_tv_chart(code: str, ktype_str: str = "5M", bars_count: in
                     const volStr = Number(meta.volume || 0).toLocaleString();
                     tradingInfo.innerHTML = `
                         <b>📅 ${{meta.time_str_myt}} MYT</b> &nbsp;|&nbsp; <b>${{meta.session_label}}</b><br/>
-                        開: <b>$${{data.open.toFixed(2)}}</b> &nbsp;
+                        开: <b>$${{data.open.toFixed(2)}}</b> &nbsp;
                         高: <b style="color:#F43F5E;">$${{data.high.toFixed(2)}}</b> &nbsp;
                         低: <b style="color:#10B981;">$${{data.low.toFixed(2)}}</b> &nbsp;
                         收: <b style="color:${{color}};">$${{data.close.toFixed(2)}}</b> (${{chgStr}}) &nbsp;|&nbsp;
@@ -253,13 +238,11 @@ def render_lightweight_tv_chart(code: str, ktype_str: str = "5M", bars_count: in
                     `;
                 }}
 
-                // 初始載入顯示最後一根
                 if (rawCandles.length > 0) {{
                     const last = rawCandles[rawCandles.length - 1];
                     updateHUD(last, last);
                 }}
 
-                // 十字光標移動時動態切換 Trading Info
                 chart.subscribeCrosshairMove(param => {{
                     if (!param.time || !param.seriesData.get(candleSeries)) {{
                         if (rawCandles.length > 0) {{
@@ -273,10 +256,19 @@ def render_lightweight_tv_chart(code: str, ktype_str: str = "5M", bars_count: in
                     updateHUD(meta, data);
                 }});
 
+                // 核心修复：自动根据单根蜡烛宽度 (Bar-Width) 完整铺设 Extended Hours 遮罩
                 function drawExtendedShading() {{
                     resizeCanvas();
                     ctx.clearRect(0, 0, canvas.width, canvas.height);
                     const timeScale = chart.timeScale();
+                    if (rawCandles.length < 2) return;
+
+                    // 计算当前屏幕上一根 K 线的实际平均像素跨度
+                    const c0 = timeScale.timeToCoordinate(rawCandles[0].time);
+                    const c1 = timeScale.timeToCoordinate(rawCandles[1].time);
+                    const singleBarWidth = (c0 !== null && c1 !== null) ? Math.max(Math.abs(c1 - c0), 6) : 8;
+                    const halfBar = singleBarWidth / 2.0;
+
                     let extStartIdx = null;
                     for (let i = 0; i < rawCandles.length; i++) {{
                         if (rawCandles[i].is_ext) {{
@@ -294,9 +286,9 @@ def render_lightweight_tv_chart(code: str, ktype_str: str = "5M", bars_count: in
                         const x1 = timeScale.timeToCoordinate(rawCandles[fromIdx].time);
                         const x2 = timeScale.timeToCoordinate(rawCandles[toIdx].time);
                         if (x1 !== null && x2 !== null) {{
-                            const startX = Math.min(x1, x2) - 2;
-                            const width = Math.abs(x2 - x1) + 4;
-                            ctx.fillStyle = 'rgba(255, 255, 255, 0.04)';
+                            const startX = Math.min(x1, x2) - halfBar;
+                            const width = Math.abs(x2 - x1) + singleBarWidth;
+                            ctx.fillStyle = 'rgba(255, 255, 255, 0.055)';
                             ctx.fillRect(startX, 0, width, canvas.height - 30);
                         }}
                     }}
@@ -312,4 +304,4 @@ def render_lightweight_tv_chart(code: str, ktype_str: str = "5M", bars_count: in
         """
         components.html(html_code, height=580, scrolling=False)
     except Exception as e:
-        st.error(f"❌ 圖表渲染異常: {str(e)}")
+        st.error(f"❌ 图表渲染异常: {str(e)}")
