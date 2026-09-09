@@ -1,5 +1,5 @@
 # 文件名: chart_view_plugin.py
-# 職責: 渲染 QQQ 納指大盤中樞 (TradingView 原生 Extended Hours 遮罩投影 · 視窗外坐標防裁剪 · 時段標籤與 PMH/PML 攻防線)
+# 職責: 渲染 QQQ 納指大盤中樞 (TradingView 原生 Extended Hours 分區遮罩 · 消除 HTML 外漏 · 自動標註 High/Low 極值)
 
 import os
 import json
@@ -30,9 +30,7 @@ def safe_py_val(v):
     return str(v)
 
 def load_kline_safe(code: str, ktype: str = "1H", bars: int = 1500) -> pd.DataFrame:
-    """
-    加載本地數據並精確標註時段屬性 (04:00~09:30 盤前 / 16:00~20:00 盤後)
-    """
+    """加載本地數據並精確標註時段屬性 (04:00~09:30 PRE / 16:00~20:00 POST)"""
     clean_code = code.replace('.', '_')
     k_suffix = "5M" if "5" in ktype.upper() else ("1H" if "1H" in ktype.upper() or "60" in ktype.upper() else "DAY")
     
@@ -69,7 +67,6 @@ def load_kline_safe(code: str, ktype: str = "1H", bars: int = 1500) -> pd.DataFr
                         minutes = df['dt'].dt.minute
                         time_mins = hours * 60 + minutes
                         
-                        # 04:00~09:30 PRE / 16:00~20:00 POST
                         is_pre = (time_mins >= 240) & (time_mins < 570)
                         is_post = (time_mins >= 960) & (time_mins <= 1200)
                         df['is_ext'] = is_pre | is_post
@@ -83,9 +80,7 @@ def load_kline_safe(code: str, ktype: str = "1H", bars: int = 1500) -> pd.DataFr
     return pd.DataFrame()
 
 def render_lightweight_tv_chart(code: str = "US.QQQ", ktype: str = "1H", bars: int = 1500):
-    """
-    QQQ 納指中樞主圖入口
-    """
+    """QQQ 納指中樞主圖入口"""
     check_and_auto_heal(code)
     
     c1, c2 = st.columns([3, 7])
@@ -107,10 +102,9 @@ def render_lightweight_tv_chart(code: str = "US.QQQ", ktype: str = "1H", bars: i
     last_session = str(df['session_type'].iloc[-1])
     
     ema20 = float(df['close'].ewm(span=20).mean().iloc[-1])
-    recent_high = float(df['high'].tail(24).max())
-    recent_low = float(df['low'].tail(24).min())
+    recent_high = float(df['high'].tail(30).max())
+    recent_low = float(df['low'].tail(30).min())
 
-    # 提取當日盤前 PMH / PML (若最後一根處於 PRE 時段)
     pmh_val, pml_val = None, None
     if last_session == 'PRE':
         today_date = time_last[:10]
@@ -119,30 +113,27 @@ def render_lightweight_tv_chart(code: str = "US.QQQ", ktype: str = "1H", bars: i
             pmh_val = float(df_today_pre['high'].max())
             pml_val = float(df_today_pre['low'].min())
 
-    # 頂部 HUD 狀態卡
     session_badge = "<span style='color:#ffd600;'>🟡 PREMARKET (盤前)</span>" if last_session == 'PRE' else ("<span style='color:#00e5ff;'>🔵 AFTERMARKET (盤後)</span>" if last_session == 'POST' else "<span style='color:#00e676;'>🟢 REGULAR (常規盤)</span>")
     
-    st.markdown(
-        f"""
-        <div style="background-color: #0d1117; border: 1px solid #30363d; border-radius: 8px; padding: 12px 18px; margin-bottom: 12px; font-family: monospace;">
-            <div style="font-size: 15px; font-weight: bold; color: #58a6ff; display: flex; justify-content: space-between; align-items: center;">
-                <span>👑 {code} · {actual_ktype} 核心戰區 (全時段 Extended Hours 已對齊 · 滿載 {len(df)} 根)</span>
-                <span style="font-size: 13px;">時段: {session_badge} | 最新: {time_last} ET</span>
-            </div>
-            <div style="margin-top: 6px; display: flex; flex-wrap: wrap; gap: 20px; font-size: 13px; color: #c9d1d9;">
-                <span>現價: <b style="color: #79c0ff;">${curr_close:.2f}</b></span>
-                <span>EMA20 生命線: <b style="color: #ffd600;">${ema20:.2f}</b></span>
-                <span>近期阻力 (SBR): <b style="color: #ff7b72;">${recent_high:.2f}</b></span>
-                <span>近期支撐 (RBS): <b style="color: #56d364;">${recent_low:.2f}</b></span>
-                {f'<span>🟡 PMH: <b style="color:#ffd600;">${pmh_val:.2f}</b> | PML: <b style="color:#ffd600;">${pml_val:.2f}</b></span>' if pmh_val else ''}
-                <span>當根量能: <b style="color: #e040fb;">{curr_vol:,.0f}</b></span>
-            </div>
-        </div>
-        """,
-        unsafe_allow_html=True
+    # 嚴格無縮排 HTML 字串，徹底杜絕程式碼外漏
+    pmh_str = f"<span>🟡 PMH: <b style='color:#ffd600;'>${pmh_val:.2f}</b> | PML: <b style='color:#ffd600;'>${pml_val:.2f}</b></span>" if pmh_val else ""
+    hud_html = (
+        f'<div style="background-color: #0d1117; border: 1px solid #30363d; border-radius: 8px; padding: 12px 18px; margin-bottom: 12px; font-family: monospace;">'
+        f'<div style="font-size: 15px; font-weight: bold; color: #58a6ff; display: flex; justify-content: space-between; align-items: center;">'
+        f'<span>👑 {code} · {actual_ktype} 核心戰區 (全時段 Extended Hours 已對齊 · 滿載 {len(df)} 根)</span>'
+        f'<span style="font-size: 13px;">時段: {session_badge} | 最新: {time_last} ET</span>'
+        f'</div>'
+        f'<div style="margin-top: 6px; display: flex; flex-wrap: wrap; gap: 20px; font-size: 13px; color: #c9d1d9;">'
+        f'<span>現價: <b style="color: #79c0ff;">${curr_close:.2f}</b></span>'
+        f'<span>EMA20 生命線: <b style="color: #ffd600;">${ema20:.2f}</b></span>'
+        f'<span>近期阻力 (SBR): <b style="color: #ff7b72;">${recent_high:.2f}</b></span>'
+        f'<span>近期支撐 (RBS): <b style="color: #56d364;">${recent_low:.2f}</b></span>'
+        f'{pmh_str}'
+        f'<span>當根量能: <b style="color: #e040fb;">{curr_vol:,.0f}</b></span>'
+        f'</div></div>'
     )
+    st.markdown(hud_html, unsafe_allow_html=True)
 
-    # 繪圖開關
     t1, t2, t3, t4 = st.columns(4)
     with t1:
         show_ext = st.checkbox("🌙 盤前盤後遮罩 (Extended Hours)", value=True)
@@ -187,11 +178,10 @@ def render_lightweight_tv_chart(code: str = "US.QQQ", ktype: str = "1H", bars: i
                 "value": round(float(row['ema20']), 2)
             })
 
-        # 區間分組
         if is_e and not in_ext:
             in_ext = True
             ext_start = t_val
-            ext_type = "PRE-MARKET" if s_type == "PRE" else "POST-MARKET"
+            ext_type = "PRE" if s_type == "PRE" else "POST"
         elif not is_e and in_ext:
             in_ext = False
             prev_val = safe_py_val(df.iloc[idx - 1]['time_val'])
@@ -201,10 +191,36 @@ def render_lightweight_tv_chart(code: str = "US.QQQ", ktype: str = "1H", bars: i
         last_val = safe_py_val(df.iloc[-1]['time_val'])
         ext_ranges.append({"start": ext_start, "end": last_val, "type": ext_type})
 
+    # 計算最近視窗的最高/最低點打點 (對齊 TradingView 原生 High/Low Marker)
+    markers_data = []
+    if len(df) >= 10:
+        recent_slice = df.tail(60).reset_index(drop=True)
+        max_idx = recent_slice['high'].idxmax()
+        min_idx = recent_slice['low'].idxmin()
+        
+        row_max = recent_slice.iloc[max_idx]
+        row_min = recent_slice.iloc[min_idx]
+        
+        markers_data.append({
+            "time": safe_py_val(row_max['time_val']),
+            "position": "aboveBar",
+            "color": "#818cf8",
+            "shape": "arrowDown",
+            "text": f"High: ${float(row_max['high']):.2f}"
+        })
+        markers_data.append({
+            "time": safe_py_val(row_min['time_val']),
+            "position": "belowBar",
+            "color": "#818cf8",
+            "shape": "arrowUp",
+            "text": f"Low: ${float(row_min['low']):.2f}"
+        })
+
     candles_json = json.dumps(candles_data, default=safe_py_val)
     volume_json = json.dumps(volume_data, default=safe_py_val)
     ema_json = json.dumps(ema_data, default=safe_py_val)
     ext_ranges_json = json.dumps(ext_ranges, default=safe_py_val)
+    markers_json = json.dumps(markers_data, default=safe_py_val)
 
     html_code = f"""
     <!DOCTYPE html>
@@ -213,27 +229,31 @@ def render_lightweight_tv_chart(code: str = "US.QQQ", ktype: str = "1H", bars: i
         <meta charset="utf-8" />
         <script src="https://unpkg.com/lightweight-charts@4.1.1/dist/lightweight-charts.standalone.production.js"></script>
         <style>
-            body {{ margin: 0; padding: 0; background-color: #0d1117; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; position: relative; overflow: hidden; }}
-            #tv_chart_container {{ width: 100%; height: 560px; position: relative; }}
-            #shading_canvas {{ position: absolute; top: 0; left: 0; width: 100%; height: 560px; pointer-events: none; z-index: 1; }}
+            body {{ margin: 0; padding: 0; background-color: #0d1117; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }}
+            #chart_wrapper {{ position: relative; width: 100%; height: 560px; background-color: #0d1117; overflow: hidden; }}
+            #bg_canvas {{ position: absolute; top: 0; left: 0; width: 100%; height: 560px; z-index: 0; pointer-events: none; }}
+            #tv_chart_container {{ position: absolute; top: 0; left: 0; width: 100%; height: 560px; z-index: 1; }}
         </style>
     </head>
     <body>
-        <div id="tv_chart_container">
-            <canvas id="shading_canvas"></canvas>
+        <div id="chart_wrapper">
+            <canvas id="bg_canvas"></canvas>
+            <div id="tv_chart_container"></div>
         </div>
         <script>
             const container = document.getElementById('tv_chart_container');
-            const shadingCanvas = document.getElementById('shading_canvas');
+            const bgCanvas = document.getElementById('bg_canvas');
+            
+            // 核心：將圖表畫布設為透明 (transparent)，底層的 Extended Hours 遮罩才能 100% 顯現
             const chart = LightweightCharts.createChart(container, {{
                 layout: {{
-                    background: {{ type: 'solid', color: '#0d1117' }},
+                    background: {{ type: 'solid', color: 'transparent' }},
                     textColor: '#8b949e',
                     fontSize: 12,
                 }},
                 grid: {{
-                    vertLines: {{ color: '#161b22' }},
-                    horzLines: {{ color: '#161b22' }},
+                    vertLines: {{ color: 'rgba(255, 255, 255, 0.03)' }},
+                    horzLines: {{ color: 'rgba(255, 255, 255, 0.03)' }},
                 }},
                 crosshair: {{
                     mode: LightweightCharts.CrosshairMode.Normal,
@@ -262,6 +282,12 @@ def render_lightweight_tv_chart(code: str = "US.QQQ", ktype: str = "1H", bars: i
                 wickDownColor: '#FF5252',
             }});
             candleSeries.setData({candles_json});
+
+            // 標註最高價與最低價極值點
+            const markers = {markers_json};
+            if (markers.length > 0) {{
+                candleSeries.setMarkers(markers);
+            }}
 
             if ({str(show_vol).lower()}) {{
                 const volumeSeries = chart.addHistogramSeries({{
@@ -300,7 +326,6 @@ def render_lightweight_tv_chart(code: str = "US.QQQ", ktype: str = "1H", bars: i
                 }});
             }}
 
-            // PMH / PML 水平線
             {f"""
             candleSeries.createPriceLine({{
                 price: {pmh_val},
@@ -320,19 +345,22 @@ def render_lightweight_tv_chart(code: str = "US.QQQ", ktype: str = "1H", bars: i
             }});
             """ if pmh_val else ""}
 
-            // 繪製 Extended Hours 遮罩與文字標籤
+            // 繪製 TradingView 原生風格 Extended Hours 遮罩 (底層畫布注入)
             const extRanges = {ext_ranges_json};
             const showExt = {str(show_ext).lower()};
 
-            function drawExtendedHoursShading() {{
-                const ctx = shadingCanvas.getContext('2d');
+            function drawExtendedHoursBackdrop() {{
+                const ctx = bgCanvas.getContext('2d');
                 const w = container.clientWidth;
                 const h = container.clientHeight;
-                shadingCanvas.width = w;
-                shadingCanvas.height = h;
-                ctx.clearRect(0, 0, w, h);
+                bgCanvas.width = w;
+                bgCanvas.height = h;
 
-                if (!showExt || extRanges.length === 0) return;
+                // 1. 常規交易盤純黑底色
+                ctx.fillStyle = '#0d1117';
+                ctx.fillRect(0, 0, w, h);
+
+                if (!showExt || !extRanges || extRanges.length === 0) return;
 
                 const timeScale = chart.timeScale();
                 const visibleRange = timeScale.getVisibleRange();
@@ -350,38 +378,38 @@ def render_lightweight_tv_chart(code: str = "US.QQQ", ktype: str = "1H", bars: i
                     }}
 
                     if (x1 !== null && x2 !== null) {{
-                        const left = Math.max(0, Math.min(x1, x2) - 4);
-                        const width = Math.min(w - left, Math.abs(x2 - x1) + 8);
+                        const left = Math.max(0, Math.min(x1, x2) - 3);
+                        const width = Math.min(w - left, Math.abs(x2 - x1) + 6);
 
-                        // 1. 半透明灰底遮罩
-                        ctx.fillStyle = 'rgba(100, 116, 139, 0.16)';
+                        // 2. 鋪設清晰可見的淺藍灰透明遮罩 (對齊 TradingView)
+                        ctx.fillStyle = 'rgba(56, 189, 248, 0.06)';
                         ctx.fillRect(left, 0, width, h);
 
-                        // 2. 邊界虛線
-                        ctx.strokeStyle = 'rgba(148, 163, 184, 0.45)';
+                        // 3. 繪製時段邊界垂直虛線
+                        ctx.strokeStyle = 'rgba(56, 189, 248, 0.22)';
                         ctx.lineWidth = 1;
                         ctx.setLineDash([4, 4]);
                         ctx.beginPath();
                         ctx.moveTo(left, 0); ctx.lineTo(left, h);
                         ctx.moveTo(left + width, 0); ctx.lineTo(left + width, h);
                         ctx.stroke();
-
-                        // 3. 頂部時段文字標籤
                         ctx.setLineDash([]);
-                        ctx.fillStyle = 'rgba(203, 213, 225, 0.75)';
-                        ctx.font = '11px monospace';
-                        const lbl = rng.type ? `🌙 ${{rng.type}}` : '🌙 EXT HOURS';
-                        ctx.fillText(lbl, left + 8, 22);
+
+                        // 4. 時段頂部文字徽章
+                        ctx.fillStyle = 'rgba(56, 189, 248, 0.75)';
+                        ctx.font = 'bold 11px monospace';
+                        const lbl = rng.type === 'PRE' ? '🌙 PRE-MARKET' : '🌙 POST-MARKET';
+                        ctx.fillText(lbl, left + 8, 20);
                     }}
                 }});
             }}
 
-            chart.timeScale().subscribeVisibleTimeRangeChange(drawExtendedHoursShading);
-            setTimeout(drawExtendedHoursShading, 80);
+            chart.timeScale().subscribeVisibleTimeRangeChange(drawExtendedHoursBackdrop);
+            setTimeout(drawExtendedHoursBackdrop, 60);
 
             window.addEventListener('resize', () => {{
                 chart.applyOptions({{ width: container.clientWidth }});
-                drawExtendedHoursShading();
+                drawExtendedHoursBackdrop();
             }});
         </script>
     </body>
