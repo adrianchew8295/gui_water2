@@ -208,7 +208,7 @@ class MarketDataHub:
             log_event(f"快照獲取異常: {str(e)}", "ERROR")
         return None
 
-# 全域單例實例 (對接所有外掛與 app.py)
+# 全域單例實例 (對接 app.py 與所有插件)
 hub_engine = MarketDataHub()
 data_engine = hub_engine
 
