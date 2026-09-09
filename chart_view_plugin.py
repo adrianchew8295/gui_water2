@@ -1,5 +1,5 @@
 # 文件名: chart_view_plugin.py
-# 職責: 渲染 QQQ 納指大盤中樞與多週期穿透圖表 (修復 5M/1H Unix 秒級時間戳 · 滿載最高歷史深度)
+# 職責: 渲染 QQQ 納指大盤中樞 (支援 TradingView 原生 Extended Hours 盤前盤後半透明遮罩 · 時段開關 · 最高歷史深度)
 
 import os
 import json
@@ -23,7 +23,7 @@ def check_and_auto_heal(code: str):
 
 def load_kline_safe(code: str, ktype: str = "1H", bars: int = 1500) -> pd.DataFrame:
     """
-    從本地 market_data 加載數據，並將 5M/1H 格式化為標準 Unix 秒數時間戳
+    從本地 market_data 加載數據，並識別每根 K 線所屬時段 (PREMARKET / REGULAR / AFTERMARKET)
     """
     clean_code = code.replace('.', '_')
     k_suffix = "5M" if "5" in ktype.upper() else ("1H" if "1H" in ktype.upper() or "60" in ktype.upper() else "DAY")
@@ -43,7 +43,6 @@ def load_kline_safe(code: str, ktype: str = "1H", bars: int = 1500) -> pd.DataFr
                 time_col = 'time_key' if 'time_key' in df.columns else ('time_clean' if 'time_clean' in df.columns else df.columns[0])
                 df['dt'] = pd.to_datetime(df[time_col])
                 
-                # 數值型別轉換
                 for col in ['open', 'high', 'low', 'close', 'volume']:
                     if col in df.columns:
                         df[col] = pd.to_numeric(df[col], errors='coerce')
@@ -54,12 +53,17 @@ def load_kline_safe(code: str, ktype: str = "1H", bars: int = 1500) -> pd.DataFr
                 if not df.empty and len(df) >= 5:
                     if k_suffix == "DAY":
                         df['time_val'] = df['dt'].dt.strftime('%Y-%m-%d')
+                        df['is_ext'] = False
                     else:
-                        # 5M 與 1H 必須傳入 Unix 整數秒數 (TradingView 核心硬性要求)
                         df['time_val'] = df['dt'].astype('int64') // 10**9
+                        # 判定美東時間是否為盤前 (04:00~09:30) 或 盤後 (16:00~20:00)
+                        hours = df['dt'].dt.hour
+                        minutes = df['dt'].dt.minute
+                        time_mins = hours * 60 + minutes
+                        df['is_ext'] = ((time_mins >= 240) & (time_mins < 570)) | ((time_mins >= 960) & (time_mins <= 1200))
                         
                     df['time_display'] = df['dt'].dt.strftime('%Y-%m-%d %H:%M')
-                    return df[['time_val', 'time_display', 'open', 'high', 'low', 'close', 'volume']]
+                    return df[['time_val', 'time_display', 'open', 'high', 'low', 'close', 'volume', 'is_ext']]
             except Exception:
                 pass
                 
@@ -97,8 +101,8 @@ def render_lightweight_tv_chart(code: str = "US.QQQ", ktype: str = "1H", bars: i
         f"""
         <div style="background-color: #0d1117; border: 1px solid #30363d; border-radius: 8px; padding: 12px 18px; margin-bottom: 12px; font-family: monospace;">
             <div style="font-size: 15px; font-weight: bold; color: #58a6ff; display: flex; justify-content: space-between; align-items: center;">
-                <span>👑 {code} · {actual_ktype} 核心戰區 (全時段無斷層 · 滿載 {len(df)} 根)</span>
-                <span style="font-size: 12px; color: #8b949e;">最新時間: {time_last}</span>
+                <span>👑 {code} · {actual_ktype} 核心戰區 (全時段 Extended Hours 已對齊 · 滿載 {len(df)} 根)</span>
+                <span style="font-size: 12px; color: #8b949e;">最新時間: {time_last} ET</span>
             </div>
             <div style="margin-top: 6px; display: flex; flex-wrap: wrap; gap: 20px; font-size: 13px; color: #c9d1d9;">
                 <span>現價: <b style="color: #79c0ff;">${curr_close:.2f}</b></span>
@@ -112,22 +116,31 @@ def render_lightweight_tv_chart(code: str = "US.QQQ", ktype: str = "1H", bars: i
         unsafe_allow_html=True
     )
 
-    t1, t2, t3 = st.columns(3)
+    # 繪圖開關 (新增 Extended Hours 遮罩開關)
+    t1, t2, t3, t4 = st.columns(4)
     with t1:
-        show_ema = st.checkbox("🟡 EMA20 生命線", value=True)
+        show_ext = st.checkbox("🌙 盤前盤後遮罩 (Extended Hours)", value=True)
     with t2:
-        show_sbr_rbs = st.checkbox("🧱 近期 SBR/RBS 攻防帶", value=True)
+        show_ema = st.checkbox("🟡 EMA20 生命線", value=True)
     with t3:
+        show_sbr_rbs = st.checkbox("🧱 近期 SBR/RBS 攻防帶", value=True)
+    with t4:
         show_vol = st.checkbox("📊 成交量副圖 (Volume)", value=True)
 
     candles_data = []
     volume_data = []
     ema_data = []
+    ext_ranges = [] # 提取連續的 Extended Hours 區間
     
     df['ema20'] = df['close'].ewm(span=20).mean()
     
-    for _, row in df.iterrows():
-        t_val = row['time_val'] # DAY 為字串，5M/1H 為整數秒
+    in_ext = False
+    ext_start = None
+    
+    for idx, row in df.iterrows():
+        t_val = row['time_val']
+        is_e = bool(row['is_ext'])
+        
         candles_data.append({
             "time": t_val,
             "open": float(row['open']),
@@ -146,9 +159,21 @@ def render_lightweight_tv_chart(code: str = "US.QQQ", ktype: str = "1H", bars: i
                 "value": round(float(row['ema20']), 2)
             })
 
+        # 區間聚合
+        if is_e and not in_ext:
+            in_ext = True
+            ext_start = t_val
+        elif not is_e and in_ext:
+            in_ext = False
+            ext_ranges.append({"start": ext_start, "end": df.iloc[idx-1]['time_val']})
+            
+    if in_ext:
+        ext_ranges.append({"start": ext_start, "end": df.iloc[-1]['time_val']})
+
     candles_json = json.dumps(candles_data)
     volume_json = json.dumps(volume_data)
     ema_json = json.dumps(ema_data)
+    ext_ranges_json = json.dumps(ext_ranges)
 
     html_code = f"""
     <!DOCTYPE html>
@@ -157,14 +182,18 @@ def render_lightweight_tv_chart(code: str = "US.QQQ", ktype: str = "1H", bars: i
         <meta charset="utf-8" />
         <script src="https://unpkg.com/lightweight-charts@4.1.1/dist/lightweight-charts.standalone.production.js"></script>
         <style>
-            body {{ margin: 0; padding: 0; background-color: #0d1117; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }}
-            #tv_chart_container {{ width: 100%; height: 560px; }}
+            body {{ margin: 0; padding: 0; background-color: #0d1117; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; position: relative; }}
+            #tv_chart_container {{ width: 100%; height: 560px; position: relative; }}
+            #shading_canvas {{ position: absolute; top: 0; left: 0; width: 100%; height: 560px; pointer-events: none; z-index: 1; }}
         </style>
     </head>
     <body>
-        <div id="tv_chart_container"></div>
+        <div id="tv_chart_container">
+            <canvas id="shading_canvas"></canvas>
+        </div>
         <script>
             const container = document.getElementById('tv_chart_container');
+            const shadingCanvas = document.getElementById('shading_canvas');
             const chart = LightweightCharts.createChart(container, {{
                 layout: {{
                     background: {{ type: 'solid', color: '#0d1117' }},
@@ -194,7 +223,6 @@ def render_lightweight_tv_chart(code: str = "US.QQQ", ktype: str = "1H", bars: i
                 handleScale: {{ axisPressedMouseMove: true, mouseWheel: true, pinch: true }},
             }});
 
-            // 1. 主 K 線 Series
             const candleSeries = chart.addCandlestickSeries({{
                 upColor: '#00E676',
                 downColor: '#FF5252',
@@ -204,7 +232,6 @@ def render_lightweight_tv_chart(code: str = "US.QQQ", ktype: str = "1H", bars: i
             }});
             candleSeries.setData({candles_json});
 
-            // 2. 成交量副圖
             if ({str(show_vol).lower()}) {{
                 const volumeSeries = chart.addHistogramSeries({{
                     priceFormat: {{ type: 'volume' }},
@@ -214,7 +241,6 @@ def render_lightweight_tv_chart(code: str = "US.QQQ", ktype: str = "1H", bars: i
                 volumeSeries.setData({volume_json});
             }}
 
-            // 3. EMA20 生命線
             if ({str(show_ema).lower()}) {{
                 const emaSeries = chart.addLineSeries({{
                     color: '#FFD600',
@@ -224,7 +250,6 @@ def render_lightweight_tv_chart(code: str = "US.QQQ", ktype: str = "1H", bars: i
                 emaSeries.setData({ema_json});
             }}
 
-            // 4. SBR / RBS 水平戰區線
             if ({str(show_sbr_rbs).lower()}) {{
                 candleSeries.createPriceLine({{
                     price: {recent_high},
@@ -244,8 +269,40 @@ def render_lightweight_tv_chart(code: str = "US.QQQ", ktype: str = "1H", bars: i
                 }});
             }}
 
+            // 繪製 Extended Hours 盤前/盤後半透明灰框遮罩 (TradingView 原生質感)
+            const extRanges = {ext_ranges_json};
+            const showExt = {str(show_ext).lower()};
+
+            function drawExtendedHoursShading() {{
+                const ctx = shadingCanvas.getContext('2d');
+                shadingCanvas.width = container.clientWidth;
+                shadingCanvas.height = container.clientHeight;
+                ctx.clearRect(0, 0, shadingCanvas.width, shadingCanvas.height);
+
+                if (!showExt || extRanges.length === 0) return;
+
+                const timeScale = chart.timeScale();
+                ctx.fillStyle = 'rgba(255, 255, 255, 0.04)';
+
+                extRanges.forEach(rng => {{
+                    const x1 = timeScale.timeToCoordinate(rng.start);
+                    const x2 = timeScale.timeToCoordinate(rng.end);
+                    if (x1 !== null && x2 !== null) {{
+                        const left = Math.min(x1, x2) - 6;
+                        const width = Math.abs(x2 - x1) + 12;
+                        ctx.fillRect(left, 0, width, shadingCanvas.height);
+                    }} else if (x1 !== null) {{
+                        ctx.fillRect(x1 - 6, 0, 18, shadingCanvas.height);
+                    }}
+                }});
+            }}
+
+            chart.timeScale().subscribeVisibleTimeRangeChange(drawExtendedHoursShading);
+            setTimeout(drawExtendedHoursShading, 100);
+
             window.addEventListener('resize', () => {{
                 chart.applyOptions({{ width: container.clientWidth }});
+                drawExtendedHoursShading();
             }});
         </script>
     </body>
