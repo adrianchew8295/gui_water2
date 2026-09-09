@@ -1,5 +1,5 @@
 # 文件名: macro_radar_plugin.py
-# 職責: 整合 TradingView Lightweight Charts 原生 Canvas 渲染、繪圖圖層開關、數據自審核與 AI Markdown 日誌
+# 職責: 整合 TradingView Lightweight Charts 原生 Canvas 渲染、繪圖圖層開關、數據自審核與 AI Markdown 日誌 (固定最高歷史跨度)
 
 import os
 import json
@@ -13,11 +13,11 @@ from macro_radar_engine import compute_radar_channel_and_markdown
 
 tz_ny = pytz.timezone("America/New_York")
 
-def fetch_daily_kline_safe(code: str, bars: int = 300) -> pd.DataFrame:
-    """極速安全加載日線數據 (優先讀取本地已校準 CSV -> OpenD 倒序拉取 -> yfinance 備援)"""
+def fetch_daily_kline_safe(code: str, bars: int = 500) -> pd.DataFrame:
+    """極速安全加載日線數據 (固定拉滿最高歷史深度)"""
     clean_code = code.replace('.', '_')
     
-    # 1. 優先讀取本地 market_data CSV (已由 Step 1 深度對齊)
+    # 1. 優先讀取本地 market_data CSV (已由 data_engine 深度對齊)
     candidates = [
         f"./market_data/{clean_code}_DAY.csv",
         f"./market_data/{code}_DAY.csv",
@@ -53,12 +53,11 @@ def fetch_daily_kline_safe(code: str, bars: int = 300) -> pd.DataFrame:
         quote_ctx.close()
         if ret == RET_OK and df_k is not None and not df_k.empty:
             df = df_k.copy()
-            df.columns = [c.lower().strip() for c in df.columns]
+            df.columns = [c.lower() for c in df.columns]
             time_col = 'time_key' if 'time_key' in df.columns else df.columns[0]
             df['time_clean'] = df[time_col].astype(str).str.slice(0, 10)
             df = df[['time_clean', 'open', 'high', 'low', 'close', 'volume']].drop_duplicates('time_clean').sort_values('time_clean').tail(bars).reset_index(drop=True)
             
-            # 自動沉澱本地
             try:
                 os.makedirs("./market_data", exist_ok=True)
                 df.to_csv(f"./market_data/{clean_code}_DAY.csv", index=False)
@@ -87,7 +86,7 @@ def fetch_daily_kline_safe(code: str, bars: int = 300) -> pd.DataFrame:
 
 def render_macro_radar_view(assets=None):
     """
-    12 檔宏觀雷達主入口：相容傳入 list / DataFrame / None，支援 TradingView 原生渲染與圖層控制
+    12 檔宏觀雷達主入口：固定載入最高歷史深度，無多餘滑桿干擾
     """
     default_symbols = ["US.NVDA", "US.QQQ", "US.AAPL", "US.MSFT", "US.AMZN", "US.GOOGL", "US.META", "US.TSLA", "US.AVGO", "US.MU", "US.AMD", "US.WDC", "US.STX"]
     symbol_options = []
@@ -104,15 +103,11 @@ def render_macro_radar_view(assets=None):
     if not symbol_options:
         symbol_options = default_symbols
 
-    # 1. 標的選擇器與長度控制
-    c_sel, c_bar = st.columns([3, 2])
-    with c_sel:
-        target_code = st.selectbox("🎯 選擇分析標的", symbol_options, index=0 if "US.NVDA" not in symbol_options else symbol_options.index("US.NVDA"))
-    with c_bar:
-        bars_count = st.slider("🎛️ 歷史 K 線跨度 (Bars)", min_value=60, max_value=500, value=250, step=10)
+    # 1. 標的選擇器 (直接滿版呈現，無滑塊調試)
+    target_code = st.selectbox("🎯 選擇分析標的", symbol_options, index=0 if "US.NVDA" not in symbol_options else symbol_options.index("US.NVDA"))
 
-    # 2. 加載數據
-    df = fetch_daily_kline_safe(target_code, bars=bars_count)
+    # 2. 加載最高規格日線數據 (固定 500 根滿載)
+    df = fetch_daily_kline_safe(target_code, bars=500)
     if df.empty or len(df) < 15:
         st.warning(f"⚠️ 標的 {target_code} 暫無足夠日線數據，請確認本地 market_data 或 OpenD 連線。")
         return
@@ -134,7 +129,7 @@ def render_macro_radar_view(assets=None):
         f"""
         <div style="background-color: #0d1117; border: 1px solid #30363d; border-radius: 8px; padding: 12px 18px; margin-bottom: 12px; font-family: monospace;">
             <div style="font-size: 15px; font-weight: bold; color: #58a6ff;">
-                📊 {target_code} · 純日線技術幾何通道 (John J. Murphy 體系)
+                📊 {target_code} · 純日線技術幾何通道 (John J. Murphy 體系 · 最高深度滿格)
             </div>
             <div style="margin-top: 6px; display: flex; flex-wrap: wrap; gap: 20px; font-size: 13px; color: #c9d1d9;">
                 <span>現價: <b style="color: #79c0ff;">${curr_p:.2f}</b></span>
@@ -244,7 +239,6 @@ def render_macro_radar_view(assets=None):
                 handleScale: {{ axisPressedMouseMove: true, mouseWheel: true, pinch: true }},
             }});
 
-            // 1. K 線主圖 (綠漲紅跌)
             const candleSeries = chart.addCandlestickSeries({{
                 upColor: '#00E676',
                 downColor: '#FF5252',
@@ -254,7 +248,6 @@ def render_macro_radar_view(assets=None):
             }});
             candleSeries.setData({candles_json});
 
-            // 2. 宏觀通道 - 上軌
             const resData = {res_line_json};
             if (resData.length > 0) {{
                 const resSeries = chart.addLineSeries({{
@@ -266,7 +259,6 @@ def render_macro_radar_view(assets=None):
                 resSeries.setData(resData);
             }}
 
-            // 3. 宏觀通道 - 下軌
             const supData = {sup_line_json};
             if (supData.length > 0) {{
                 const supSeries = chart.addLineSeries({{
@@ -278,13 +270,11 @@ def render_macro_radar_view(assets=None):
                 supSeries.setData(supData);
             }}
 
-            // 4. 極值點標籤
             const markers = {markers_json};
             if (markers.length > 0) {{
                 candleSeries.setMarkers(markers);
             }}
 
-            // 5. 即時 S/R 水平線
             if ({str(show_sr).lower()}) {{
                 candleSeries.createPriceLine({{
                     price: {rec_res},
@@ -304,7 +294,6 @@ def render_macro_radar_view(assets=None):
                 }});
             }}
 
-            // 6. Major Support 重大支撐線 (藍色基準線)
             if ({str(show_major).lower()}) {{
                 candleSeries.createPriceLine({{
                     price: {maj_sup},
@@ -316,7 +305,6 @@ def render_macro_radar_view(assets=None):
                 }});
             }}
 
-            // 自適應大小
             window.addEventListener('resize', () => {{
                 chart.applyOptions({{ width: container.clientWidth }});
             }});
