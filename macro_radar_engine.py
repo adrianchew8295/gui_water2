@@ -1,5 +1,5 @@
 # 文件名: macro_radar_engine.py
-# 職責: 依據 John J. Murphy 標準幾何構建平行通道 (Parallel Channel)、人性化防守位與 AI 審計日誌
+# 職責: 依據 John J. Murphy 標準平行通道幾何 (Parallel Channel)、人性化防守底座與可審計 AI Markdown
 
 import numpy as np
 import pandas as pd
@@ -25,7 +25,7 @@ def find_swing_pivots(df: pd.DataFrame, window: int = 8):
 
 def compute_radar_channel_and_markdown(df: pd.DataFrame, ticker: str = "US.NVDA") -> Dict[str, Any]:
     """
-    計算標準平行通道 (John J. Murphy 體系) 與結構化審計報告
+    計算標準平行通道 (John J. Murphy 體系) 與結構化審計日誌
     """
     if df is None or len(df) < 20:
         return {"status": "fail", "msg": "K線樣本數不足以構建幾何模型"}
@@ -46,7 +46,7 @@ def compute_radar_channel_and_markdown(df: pd.DataFrame, ticker: str = "US.NVDA"
     if len(sw_highs) < 2 or len(sw_lows) < 2:
         sw_highs, sw_lows = find_swing_pivots(df, window=4)
 
-    # 2. 人性化 Major Support（鎖定近 120 根 K 線的關鍵結構起漲平台）
+    # 2. 人性化 Major Support（鎖定近 120 根 K 線的結構起漲平台，排除遠古噪點）
     active_lookback = min(n, 120)
     recent_low_slice = lows[-active_lookback:]
     major_support_val = float(np.percentile(recent_low_slice, 10))
