@@ -1,5 +1,5 @@
 # 文件名: option_0dte_plugin.py
-# 職責: QQQ / 美股 0DTE 智能期權實戰座艙 + 專屬做功課記帳復盤機 (雙 Tab 結構 · 5M 技術還原圖 · 自動落盤 CSV · AI 審計)
+# 職責: QQQ / 美股 0DTE 智能期權實戰座艙 + 專屬做功課記帳復盤機 (最新時段強制置頂 · 待機雷達差價 · 5M 技術還原圖 · 自動落盤 CSV)
 
 import os
 import json
@@ -21,7 +21,7 @@ os.makedirs(DATA_DIR, exist_ok=True)
 JOURNAL_CSV = os.path.join(DATA_DIR, "strategy_live_journal.csv")
 
 def init_0dte_journal_file():
-    """初始化 0DTE 專屬做功課帳本 (注入涵蓋不同形態的標準樣本數據)"""
+    """初始化 0DTE 專屬做功課帳本"""
     needs_init = False
     if not os.path.exists(JOURNAL_CSV):
         needs_init = True
@@ -50,14 +50,6 @@ def init_0dte_journal_file():
                 "score_detail": "頂部SBR阻力(+25) + 2B衝頂射星(+25) + VPA 1.45x放量(+20) + 逆1H均線(+10)",
                 "reason": "摸頂 SBR 阻力帶做空，後續多頭強勢拉升逆向突破觸發紀律止損", "pdh": 726.00, "pdl": 721.50,
                 "ema20_1h": 722.10, "rbs": 721.80, "sbr": 725.00, "opt_symbol": "QQQ_260908_724P", "strike_price": 724, "is_golden_window": True
-            },
-            {
-                "trade_id": "#20260905_01", "code": "US.NVDA", "date": "2026-09-05", "time_et": "10:05", "time_myt": "22:05", "exit_time_et": "10:30",
-                "month": "2026-09", "direction": "🟢 CALL", "strategy": "Strategy 1 (2B 破底翻)", "entry": 224.50, "sl": 223.20, "tp": 227.10,
-                "exit_price": 227.10, "status": "WIN_TP", "net_r": 2.0, "pnl_usd": 400.0, "score": 90,
-                "score_detail": "日線通道下軌支撐(+25) + 5M 扎針反包(+25) + 1H EMA20 支撐(+25) + 量能放大(+15)",
-                "reason": "回踩日線墨菲通道下軌確認 + 5M 長下影鐵錘陽線", "pdh": 228.00, "pdl": 222.10,
-                "ema20_1h": 223.80, "rbs": 223.50, "sbr": 227.00, "opt_symbol": "NVDA_260905_225C", "strike_price": 225, "is_golden_window": True
             }
         ]
         pd.DataFrame(sample_data).to_csv(JOURNAL_CSV, index=False)
@@ -65,7 +57,7 @@ def init_0dte_journal_file():
 init_0dte_journal_file()
 
 def load_0dte_kline_context(code: str = "US.QQQ"):
-    """加載 5M 與日線數據"""
+    """加載 5M 與日線數據，具備最新時段主動自癒功能"""
     clean_code = code.replace('.', '_')
     p_5m = os.path.join(DATA_DIR, f"{clean_code}_5M.csv")
     p_day = os.path.join(DATA_DIR, f"{clean_code}_DAY.csv")
@@ -104,7 +96,6 @@ def auto_log_0dte_signal(target_code: str, curr_time_str: str, curr_price: float
         date_str = curr_time_str[:10]
         time_et_str = curr_time_str[11:16]
         
-        # 避免同標的同時間重複寫入
         if not df_j.empty and 'time_et' in df_j.columns and 'date' in df_j.columns and 'code' in df_j.columns:
             exists = df_j[(df_j['code'] == target_code) & (df_j['date'] == date_str) & (df_j['time_et'] == time_et_str)]
             if not exists.empty:
@@ -156,16 +147,19 @@ def analyze_0dte_tactical(df_5m: pd.DataFrame, df_day: pd.DataFrame, target_code
     curr_time_str = str(curr_bar['dt'])[:16]
     today_date_str = str(curr_bar['dt'])[:10]
 
+    # 1. 換棒倒數
     current_sec = now_ny.minute * 60 + now_ny.second
     sec_to_next_5m = 300 - (current_sec % 300)
     timer_str = f"{sec_to_next_5m // 60:02d}:{sec_to_next_5m % 60:02d}"
 
+    # 2. 昨日極值 (PDH / PDL)
     pdh, pdl = curr_price * 1.008, curr_price * 0.992
     if not df_day.empty and len(df_day) >= 2:
         prev_day = df_day.iloc[-2]
         pdh = float(prev_day['high'])
         pdl = float(prev_day['low'])
 
+    # 3. 今日盤前極值 (PMH / PML)
     df_today = df_5m[df_5m['dt'].dt.strftime('%Y-%m-%d') == today_date_str]
     hours = df_today['dt'].dt.hour
     mins = df_today['dt'].dt.minute
@@ -179,22 +173,31 @@ def analyze_0dte_tactical(df_5m: pd.DataFrame, df_day: pd.DataFrame, target_code
         pmh = curr_price * 1.004
         pml = curr_price * 0.996
 
+    # 4. 近期 SBR / RBS
     recent_slice = df_5m.tail(30)
     sbr = float(recent_slice['high'].max())
     rbs = float(recent_slice['low'].min())
 
+    # 5. 5M 量能比 (VMA20)
     df_5m['vma20'] = df_5m['volume'].rolling(window=20).mean()
     curr_vol = float(curr_bar['volume'])
     vma20_val = float(df_5m['vma20'].iloc[-1]) if pd.notna(df_5m['vma20'].iloc[-1]) and df_5m['vma20'].iloc[-1] > 0 else 1.0
     vol_ratio = curr_vol / vma20_val
 
+    # 6. 計算距離關鍵邊界的動態差價 (消除 Standstill 盲區)
+    target_support = min(pml, rbs)
+    target_resistance = max(pmh, sbr)
+    dist_to_support = curr_price - target_support
+    dist_to_resistance = target_resistance - curr_price
+
+    # 7. 2B 假突破定罪
     is_bull_2b = False
     is_bear_2b = False
     prev_bar = df_5m.iloc[-2]
 
-    if prev_bar['low'] <= min(pml, rbs) and curr_bar['close'] > min(pml, rbs) and curr_bar['close'] >= curr_bar['open']:
+    if prev_bar['low'] <= target_support and curr_bar['close'] > target_support and curr_bar['close'] >= curr_bar['open']:
         is_bull_2b = True
-    if prev_bar['high'] >= max(pmh, sbr) and curr_bar['close'] < max(pmh, sbr) and curr_bar['close'] <= curr_bar['open']:
+    if prev_bar['high'] >= target_resistance and curr_bar['close'] < target_resistance and curr_bar['close'] <= curr_bar['open']:
         is_bear_2b = True
 
     risk_unit = max(0.60, abs(curr_bar['high'] - curr_bar['low']))
@@ -225,7 +228,7 @@ def analyze_0dte_tactical(df_5m: pd.DataFrame, df_day: pd.DataFrame, target_code
         auto_log_0dte_signal(target_code, curr_time_str, curr_price, sl_price, tp_price, f"{target_code.replace('US.', '')}_{now_ny.strftime('%y%m%d')}_{strike_price}P", strike_price, "PUT", vol_ratio, "5M 衝頂 PMH/SBR 阻力 + 2B 放量假突破回落")
     else:
         action_type = "WAIT"
-        action_banner = "☕ 安全中繼待機區 (未觸發 0DTE 邊界扳機 · 嚴禁追單)"
+        action_banner = f"☕ 安全中繼待機區 (距地板支撐 -${dist_to_support:.2f} | 距天花板阻力 +${dist_to_resistance:.2f} · 嚴禁追單)"
         action_color = "#8b949e"
         action_bg = "rgba(139, 148, 158, 0.08)"
         action_border = "#30363d"
@@ -259,13 +262,19 @@ def analyze_0dte_tactical(df_5m: pd.DataFrame, df_day: pd.DataFrame, target_code
         opt_sl_price = 0.00
         opt_tp_price = 0.00
 
+    # 8. 過去 6 根 5M 量價流水（強制降序倒序排列：最新時段置頂 Top Row）
     recent_6_bars = []
-    for _, b in df_5m.tail(6).iterrows():
+    df_slice_desc = df_5m.tail(6).iloc[::-1].reset_index(drop=True)
+    for idx, b in df_slice_desc.iterrows():
         b_vol = float(b['volume'])
         b_ratio = b_vol / vma20_val
         is_green = float(b['close']) >= float(b['open'])
+        time_tag = str(b['dt'])[11:16]
+        if idx == 0:
+            time_tag = f"⚡ {time_tag} (最新)"
+
         recent_6_bars.append({
-            "時段 (ET)": str(b['dt'])[11:16],
+            "時段 (ET)": time_tag,
             "現價/收盤": f"${float(b['close']):.2f}",
             "方向": "🟢 陽線" if is_green else "🔴 陰線",
             "影線高低": f"${float(b['high']):.2f} / ${float(b['low']):.2f}",
@@ -285,9 +294,9 @@ def analyze_0dte_tactical(df_5m: pd.DataFrame, df_day: pd.DataFrame, target_code
   - 🛡️ 期權止損線 (-35% SL): **${opt_sl_price:.2f}**
   - 🎯 期權止盈線 (+70% TP): **${opt_tp_price:.2f}** (嚴格鎖定 1:2 盈虧比)"""
     else:
-        trade_plan_md = """#### 2. 0DTE 戰術狀態
-- **當前射控狀態**: **⚪ 處於安全中繼待機區 (未觸發 0DTE 邊界扳機 · 嚴格空倉觀望)**
-- **備註**: 正股未踩入 PML/RBS 支撐或 PMH/SBR 阻力，且無 2B 放量反轉，強制鎖定開火權限以防 Theta 磨損。"""
+        trade_plan_md = f"""#### 2. 0DTE 待機雷達狀態
+- **當前射控狀態**: **⚪ 處於安全中繼待機區 (距地板支撐 -${dist_to_support:.2f} | 距天花板阻力 +${dist_to_resistance:.2f})**
+- **戰術提示**: 正股尚未觸及關鍵空間邊界，量能未達 1.25x 門禁，系統強制鎖死開火權限，嚴格防範 Theta 磨損。"""
 
     ai_audit_md = f"""### ⚡ 【{target_code} 0DTE 日內期權戰術射控與風控日誌】
 **審計基準時戳**: {curr_time_str} ET | **正股現價**: ${curr_price:.2f} | **單筆預算上限**: ${budget_usd:.2f} USD
@@ -310,6 +319,8 @@ def analyze_0dte_tactical(df_5m: pd.DataFrame, df_day: pd.DataFrame, target_code
         "pdh": pdh, "pdl": pdl,
         "pmh": pmh, "pml": pml,
         "sbr": sbr, "rbs": rbs,
+        "dist_to_support": dist_to_support,
+        "dist_to_resistance": dist_to_resistance,
         "is_armed": is_armed,
         "action_type": action_type,
         "action_banner": action_banner,
@@ -366,22 +377,22 @@ def render_0dte_live_fragment(target_code: str, budget_input: float):
         unsafe_allow_html=True
     )
 
-    # 核心指令卡 (防呆鎖定)
+    # 核心指令卡 (待機雷達防呆)
     if data['is_armed']:
         strike_html = f"<div style='font-size: 26px; font-weight: bold; color: #ffd600;'>${data['strike_price']} {data['opt_type']}</div>"
         code_html = f"<div style='font-size: 16px; font-weight: bold; color: #58a6ff;'>{data['opt_symbol']}</div>"
         cost_html = f"<div style='font-size: 15px; color: #c9d1d9;'><b>${data['est_opt_premium']:.2f}</b> ➔ <b style='color:#00e5ff;'>{data['max_contracts']} 張</b> (${data['total_budget_used']:.2f})</div>"
         sltp_html = f"<div style='font-size: 15px;'><b style='color:#ff7b72;'>${data['opt_sl_price']:.2f}</b> / <b style='color:#56d364;'>${data['opt_tp_price']:.2f}</b></div>"
     else:
-        strike_html = "<div style='font-size: 20px; font-weight: bold; color: #8b949e;'>🔒 鎖定待機 (無信號)</div>"
-        code_html = "<div style='font-size: 16px; color: #8b949e;'>────────</div>"
-        cost_html = "<div style='font-size: 14px; color: #8b949e;'>☕ 嚴禁追單 · 喝茶觀望</div>"
-        sltp_html = "<div style='font-size: 14px; color: #8b949e;'>─── / ───</div>"
+        strike_html = "<div style='font-size: 18px; font-weight: bold; color: #8b949e;'>🔒 鎖定待機 (無信號)</div>"
+        code_html = "<div style='font-size: 15px; color: #8b949e;'>────────</div>"
+        cost_html = f"<div style='font-size: 13px; color: #8b949e;'>距地板支撐: <b style='color:#56d364;'>-${data['dist_to_support']:.2f}</b></div>"
+        sltp_html = f"<div style='font-size: 13px; color: #8b949e;'>距天花板阻力: <b style='color:#ff7b72;'>+${data['dist_to_resistance']:.2f}</b></div>"
 
     st.markdown(
         f"""
         <div style="background: {data['action_bg']}; border: 2px solid {data['action_border']}; border-radius: 8px; padding: 16px 20px; margin-bottom: 14px; font-family: monospace;">
-            <div style="font-size: 16px; font-weight: bold; color: {data['action_color']}; margin-bottom: 10px;">
+            <div style="font-size: 15px; font-weight: bold; color: {data['action_color']}; margin-bottom: 10px;">
                 {data['action_banner']}
             </div>
             <div style="display: flex; flex-wrap: wrap; gap: 28px; align-items: center;">
@@ -424,8 +435,8 @@ def render_0dte_live_fragment(target_code: str, budget_input: float):
         unsafe_allow_html=True
     )
 
-    # 5M 歷史柱滾動流水
-    st.markdown("##### 📊 5M 歷史柱滾動流水 (過去 30 分鐘黃金窗口)")
+    # 5M 歷史柱滾動流水（強制最新置頂）
+    st.markdown("##### 📊 5M 即時量價核心表 (最新時段強制置頂 · 過去 30 分鐘黃金窗口)")
     df_recent = pd.DataFrame(data['recent_6_bars'])
     st.dataframe(df_recent, use_container_width=True, hide_index=True)
 
@@ -462,12 +473,11 @@ def _load_kline_replay_slice(code: str, entry_date_str: str, entry_time_str: str
             except Exception:
                 pass
 
-    # 兜底模擬數列
     times = [f"{i:02d}:00" for i in range(10, 40)]
     return times, [entry_p]*30, [entry_p+1.5]*30, [entry_p-1.5]*30, [entry_p]*30, [100.0]*30, 15
 
 def render_interactive_replay_chart(trade_row: pd.Series):
-    """做功課專屬 Plotly 5M 互動圖表 (支援滾輪縮放、拖拽、技術指標與進出場打點)"""
+    """做功課專屬 Plotly 5M 互動圖表"""
     entry_p = float(trade_row.get('entry', 0.0))
     sl_p = float(trade_row.get('sl', 0.0))
     tp_p = float(trade_row.get('tp', 0.0))
@@ -488,7 +498,6 @@ def render_interactive_replay_chart(trade_row: pd.Series):
 
     fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.03, row_heights=[0.72, 0.28])
 
-    # 1. 5M 主 K 線
     fig.add_trace(go.Candlestick(
         x=times, open=opens, high=highs, low=lows, close=closes,
         increasing_line_color='#00E676', decreasing_line_color='#FF5252',
@@ -496,21 +505,17 @@ def render_interactive_replay_chart(trade_row: pd.Series):
         name="5M K線"
     ), row=1, col=1)
 
-    # 2. PDH / PDL 水平線
     fig.add_hline(y=pdh_p, line_dash="dot", line_color="#ffd700", line_width=1.2, annotation_text=f"PDH: ${pdh_p:,.2f}", annotation_position="top left", row=1, col=1)
     fig.add_hline(y=pdl_p, line_dash="dot", line_color="#ffd700", line_width=1.2, annotation_text=f"PDL: ${pdl_p:,.2f}", annotation_position="bottom left", row=1, col=1)
 
-    # 3. RBS / SBR 戰區色塊
     step_val = 0.4 if entry_p < 1000 else 15.0
     fig.add_hrect(y0=rbs_p - step_val * 0.3, y1=rbs_p + step_val * 0.3, line_width=0, fillcolor="#00E676", opacity=0.12, annotation_text="RBS 支撐", annotation_position="bottom left", row=1, col=1)
     fig.add_hrect(y0=sbr_p - step_val * 0.3, y1=sbr_p + step_val * 0.3, line_width=0, fillcolor="#FF5252", opacity=0.12, annotation_text="SBR 阻力", annotation_position="top left", row=1, col=1)
 
-    # 4. 進場 / 止損 / 止盈線
     fig.add_hline(y=entry_p, line_dash="dash", line_color="#58a6ff", annotation_text=f"進場: ${entry_p:,.2f}", annotation_position="top right", row=1, col=1)
     fig.add_hline(y=sl_p, line_dash="dash", line_color="#FF5252", annotation_text=f"止損: ${sl_p:,.2f}", annotation_position="bottom right", row=1, col=1)
     fig.add_hline(y=tp_p, line_dash="dash", line_color="#00E676", annotation_text=f"2R止盈: ${tp_p:,.2f}", annotation_position="top right", row=1, col=1)
 
-    # 5. 進場開倉打點
     if 0 <= entry_idx < len(times):
         fig.add_annotation(
             x=times[entry_idx], y=lows[entry_idx],
@@ -521,7 +526,6 @@ def render_interactive_replay_chart(trade_row: pd.Series):
             row=1, col=1
         )
 
-    # 6. 出場打點
     if 0 <= exit_idx < len(times):
         arrow_color = "#00E676" if is_win else "#FF5252"
         fig.add_annotation(
@@ -533,7 +537,6 @@ def render_interactive_replay_chart(trade_row: pd.Series):
             row=1, col=1
         )
 
-    # 7. 成交量副圖
     vol_colors = ['#00E676' if c >= o else '#FF5252' for o, c in zip(opens, closes)]
     fig.add_trace(go.Bar(x=times, y=volumes, marker_color=vol_colors, name="成交量"), row=2, col=1)
 
@@ -571,7 +574,6 @@ def render_0dte_journal_tab(target_code: str):
     df_all = pd.read_csv(JOURNAL_CSV) if os.path.exists(JOURNAL_CSV) else pd.DataFrame()
     df = df_all[df_all['code'] == target_code] if (not df_all.empty and 'code' in df_all.columns) else df_all
 
-    # 第 1 層：月份選擇
     base_months = ["2026-09", "2026-08"]
     if not df.empty and 'month' in df.columns:
         existing_m = [str(x) for x in df['month'].dropna().unique()]
@@ -590,7 +592,6 @@ def render_0dte_journal_tab(target_code: str):
     else:
         df_filtered = df[df['month'] == sel_month] if not df.empty and 'month' in df.columns else pd.DataFrame()
 
-    # 勝率與期望值統計
     wins = len(df_filtered[df_filtered['net_r'] > 0]) if not df_filtered.empty else 0
     total = len(df_filtered) if not df_filtered.empty else 0
     losses = total - wins
@@ -609,7 +610,6 @@ def render_0dte_journal_tab(target_code: str):
         </div>
         """, unsafe_allow_html=True)
 
-    # 第 2 層：日期與訊號過濾
     selected_row = None
     if not df_filtered.empty:
         dates_available = sorted(list(df_filtered['date'].dropna().unique()), reverse=True)
@@ -629,7 +629,6 @@ def render_0dte_journal_tab(target_code: str):
 
         selected_row = df_day.iloc[sel_sig_idx]
 
-        # 第 3 層：Plotly 5M 歷史現場還原圖
         st.caption(f"🔍 5M 技術復盤視圖 (標的: {target_code} · 支援滾輪縮放/左右拖拽/標籤避讓)：")
         render_interactive_replay_chart(selected_row)
 
@@ -647,7 +646,6 @@ def render_0dte_journal_tab(target_code: str):
     else:
         st.info(f"💡 【{sel_month}】當前暫無訊號記錄，系統正在以 3 秒頻率即時監控 5M 走勢中...")
 
-    # AI 專用做功課復盤日誌
     if selected_row is not None:
         is_win = selected_row.get('status') == 'WIN_TP'
         res_text = "🟢 WIN 止盈成功 (+2.0R / 獲利 +$400.00 USD)" if is_win else ("🔴 LOSS 觸發止損 (-1.0R / 虧損 -$200.00 USD)" if selected_row.get('status') == 'LOSS_SL' else "⏳ 監控持倉中")
@@ -672,7 +670,7 @@ def render_0dte_journal_tab(target_code: str):
         st.code(audit_log, language="text")
 
 def render_0dte_cockpit_view(assets=None):
-    """0DTE 主入口：雙 Tab 結構 (即時射控艙 + 記帳做功課)"""
+    """0DTE 主入口：雙 Tab 結構"""
     default_symbols = ["US.QQQ", "US.NVDA", "US.TSLA", "US.AAPL", "US.AMD", "US.MSFT", "US.AMZN", "US.META"]
     symbol_options = []
     if isinstance(assets, list) and len(assets) > 0:
@@ -690,7 +688,6 @@ def render_0dte_cockpit_view(assets=None):
     with c2:
         budget_input = st.number_input("💰 單筆期權預算上限 (USD)", min_value=50.0, max_value=5000.0, value=200.0, step=50.0)
 
-    # 雙 Tab 結構
     tab_live, tab_journal = st.tabs(["⚡ 0DTE 即時射控座艙", "📊 0DTE 策略記帳與做功課"])
     with tab_live:
         render_0dte_live_fragment(target_code, budget_input)
