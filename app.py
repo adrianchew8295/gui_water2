@@ -1,5 +1,5 @@
 # 文件名: app.py
-# 職責: GUI Water 總裝主入口 · 全面解耦各子模組 · 移除外層冗餘滑桿
+# 職責: GUI Water 總裝主入口 · 全面解耦各子模組 · 整合 QQQ、宏觀雷達、復盤帳本、實盤持倉與 0DTE 智能射控
 
 import streamlit as st
 import datetime
@@ -9,6 +9,7 @@ import chart_view_plugin
 import macro_radar_plugin
 import journal_plugin
 import portfolio_manager_plugin
+import option_0dte_plugin
 
 tz_ny = pytz.timezone("America/New_York")
 tz_my = pytz.timezone("Asia/Kuala_Lumpur")
@@ -39,15 +40,16 @@ with c_title:
 with c_clock:
     st.caption(f"美東: {now_ny.strftime('%Y-%m-%d %H:%M:%S ET')} | 馬來西亞: {now_my.strftime('%Y-%m-%d %H:%M:%S MYT')}")
 
-# 側邊欄導航
+# 側邊欄導航 (新增 0DTE 智能期權射控)
 st.sidebar.markdown("### 🧭 戰略指揮導航")
 menu = st.sidebar.radio(
     "選擇核心作戰模組",
     [
         "👑 1. US.QQQ 納指大盤總舵",
-        "📡 2. 12檔核心宏觀雷達與戰區",
-        "📊 3. 策略復盤與實盤訂單帳本",
-        "💼 4. 實盤帳戶資產與持倉管理"
+        "⚡ 2. 0DTE 智能期權射控座艙",
+        "📡 3. 12檔核心宏觀雷達與戰區",
+        "📊 4. 策略復盤與實盤訂單帳本",
+        "💼 5. 實盤帳戶資產與持倉管理"
     ],
     index=0
 )
@@ -60,19 +62,22 @@ if "1. US.QQQ" in menu:
     st.markdown("## 👑 US.QQQ 納指大盤總舵")
     t_chart, t_ana = st.tabs(["📈 Chart (圖表穿透)", "🧭 Analysis (戰區與宏觀)"])
     with t_chart:
-        # 直接呼叫外掛繪圖，不再有外層滑桿干擾
         chart_view_plugin.render_lightweight_tv_chart(code="US.QQQ")
     with t_ana:
         macro_radar_plugin.render_macro_radar_view(assets=[{"code": "US.QQQ"}])
 
-elif "2. 12檔" in menu:
+elif "2. 0DTE" in menu:
+    st.markdown("## ⚡ 0DTE 智能期權射控座艙")
+    option_0dte_plugin.render_0dte_cockpit_view(assets=assets_list)
+
+elif "3. 12檔" in menu:
     st.markdown("## 📡 12 檔核心宏觀雷達與攻防戰區")
     macro_radar_plugin.render_macro_radar_view(assets=assets_list)
 
-elif "3. 策略復盤" in menu:
+elif "4. 策略復盤" in menu:
     st.markdown("## 📊 策略復盤與實盤訂單帳本")
     journal_plugin.render_journal_view(assets_list)
 
-elif "4. 實盤帳戶" in menu:
+elif "5. 實盤帳戶" in menu:
     st.markdown("## 💼 實盤帳戶資產與持倉管理")
     portfolio_manager_plugin.render_portfolio_view()
