@@ -1,38 +1,45 @@
 # 文件名: sync_history.py
-# 职责: 批量拉取资产池中所有标的的深度历史基座 (2年日线 / 1年1小时 / 30天5分钟)
+# 職責: 依據 watchlist.json 一鍵批量深度同步 12 檔標的數據基座 (5M 全時段 + 1H Resample + DAY)
 
+import os
+import json
 import time
 from data_engine import hub_engine
 
-def run_sync():
-    assets = hub_engine.load_watchlist()
-    print("=" * 60)
-    print(f"🚀 [Market Data Hub] 开始批量同步 {len(assets)} 档标的的历史数据基座...")
-    print("=" * 60)
+def run_batch_sync():
+    watchlist_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "watchlist.json")
+    if not os.path.exists(watchlist_path):
+        print("❌ 找不到 watchlist.json，請先確認配置檔案存在！")
+        return
 
-    for item in assets:
+    try:
+        with open(watchlist_path, "r", encoding="utf-8") as f:
+            assets = json.load(f).get("assets", [])
+    except Exception as e:
+        print(f"❌ 讀取 watchlist.json 失敗: {e}")
+        return
+
+    total = len(assets)
+    print("=" * 65)
+    print(f"🚀 [Market Data Hub] 開始批量深度同步全體 {total} 檔標的數據基座...")
+    print("=" * 65)
+
+    for i, item in enumerate(assets):
         code = item["code"]
         name = item.get("name", code)
-        print(f"\n[*] 正在同步: {code} ({name})")
-
-        # 1. DAY 日线 (2年 = 730天)
-        _, msg_day = hub_engine.fetch_deep_history(code, "DAY", 730)
-        print(f"  ├── 📅 日线 (DAY 2年): {msg_day}")
+        print(f"\n[*] 正在同步 [{i+1:02d}/{total:02d}]: {code} ({name})")
+        
+        success, msg = hub_engine.sync_asset_deep_history(code=code, bars_5m=1500, bars_day=300)
+        if success:
+            print(f"  └── 🟢 {code} 數據同步成功 (5M 全時段 + 1H 聚合 + DAY 歷史)")
+        else:
+            print(f"  └── 🔴 {code} 同步失敗: {msg}")
+        
         time.sleep(0.3)
 
-        # 2. 1H 小时线 (1年 = 365天)
-        _, msg_1h = hub_engine.fetch_deep_history(code, "1H", 365)
-        print(f"  ├── ⏱️ 1小时 (1H 1年): {msg_1h}")
-        time.sleep(0.3)
-
-        # 3. 5M 连续线 (30天)
-        _, msg_5m = hub_engine.fetch_deep_history(code, "5M", 30)
-        print(f"  └── ⚡ 5分钟 (5M 30天): {msg_5m}")
-        time.sleep(0.3)
-
-    print("\n" + "=" * 60)
-    print("🎉 所有标的历史数据已全部成功落盘至 market_data/ 目录！")
-    print("=" * 60)
+    print("\n" + "=" * 65)
+    print("🎉 全部 12 檔標的數據基座深度對齊完畢！")
+    print("=" * 65)
 
 if __name__ == "__main__":
-    run_sync()
+    run_batch_sync()
