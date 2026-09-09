@@ -1,5 +1,5 @@
 # 文件名: macro_radar_plugin.py
-# 職責: 整合 TradingView Lightweight Charts 原生渲染、繪圖圖層開關、數據自審核與 AI Markdown 日誌
+# 職責: 整合 TradingView Lightweight Charts 原生 Canvas 渲染、繪圖圖層開關、數據自審核與 AI Markdown 日誌
 
 import os
 import json
@@ -14,47 +14,10 @@ from macro_radar_engine import compute_radar_channel_and_markdown
 tz_ny = pytz.timezone("America/New_York")
 
 def fetch_daily_kline_safe(code: str, bars: int = 300) -> pd.DataFrame:
-    """極速安全加載日線數據 (由後往前抓取最新 300 根，修復歷史截斷 Bug)"""
-    # 1. 優先嘗試 OpenD 直連 (倒序抓取距離當下最新的 bars 根)
-    try:
-        from moomoo import OpenQuoteContext, RET_OK, KLType, AuType
-        quote_ctx = OpenQuoteContext(host='127.0.0.1', port=11111)
-        
-        # 核心修復：start 傳入空字串，end 設為當前時刻，OpenD 會倒序截取最新 300 根
-        now_ny = datetime.datetime.now(tz_ny)
-        end_str = now_ny.strftime("%Y-%m-%d %H:%M:%S")
-        
-        ret, df_k, msg = quote_ctx.request_history_kline(
-            code=code,
-            start='',  # 留空以確保由 end 倒序往回抓取最新 K 線
-            end=end_str,
-            ktype=KLType.K_DAY,
-            autype=AuType.QFQ,
-            max_count=bars
-        )
-        quote_ctx.close()
-        
-        if ret == RET_OK and df_k is not None and not df_k.empty:
-            df = df_k.copy()
-            df.columns = [c.lower().strip() for c in df.columns]
-            time_col = 'time_key' if 'time_key' in df.columns else df.columns[0]
-            df['time_clean'] = df[time_col].astype(str).str.slice(0, 10)
-            df = df[['time_clean', 'open', 'high', 'low', 'close', 'volume']].drop_duplicates('time_clean').sort_values('time_clean').tail(bars).reset_index(drop=True)
-            
-            # 自動沉澱至本地 market_data，供離線時使用
-            try:
-                os.makedirs("./market_data", exist_ok=True)
-                clean_code = code.replace('.', '_')
-                df.to_csv(f"./market_data/{clean_code}_DAY.csv", index=False)
-            except Exception:
-                pass
-                
-            return df
-    except Exception:
-        pass
-
-    # 2. 備用：讀取本地 market_data CSV
+    """極速安全加載日線數據 (優先讀取本地已校準 CSV -> OpenD 倒序拉取 -> yfinance 備援)"""
     clean_code = code.replace('.', '_')
+    
+    # 1. 優先讀取本地 market_data CSV (已由 Step 1 深度對齊)
     candidates = [
         f"./market_data/{clean_code}_DAY.csv",
         f"./market_data/{code}_DAY.csv",
@@ -67,12 +30,45 @@ def fetch_daily_kline_safe(code: str, bars: int = 300) -> pd.DataFrame:
                 df.columns = [c.lower().strip() for c in df.columns]
                 time_col = 'time_clean' if 'time_clean' in df.columns else ('time_key' if 'time_key' in df.columns else df.columns[0])
                 df['time_clean'] = df[time_col].astype(str).str.slice(0, 10)
-                if not df.empty:
+                if not df.empty and len(df) >= 15:
                     return df[['time_clean', 'open', 'high', 'low', 'close', 'volume']].drop_duplicates('time_clean').sort_values('time_clean').tail(bars).reset_index(drop=True)
             except Exception:
                 pass
 
-    # 3. 備用：yfinance 網絡拉取最新 2 年日線
+    # 2. 備用：OpenD 直連拉取
+    try:
+        from moomoo import OpenQuoteContext, RET_OK, KLType, AuType
+        quote_ctx = OpenQuoteContext(host='127.0.0.1', port=11111)
+        now_ny = datetime.datetime.now(tz_ny)
+        end_str = now_ny.strftime("%Y-%m-%d %H:%M:%S")
+        
+        ret, df_k, _ = quote_ctx.request_history_kline(
+            code=code,
+            start='',
+            end=end_str,
+            ktype=KLType.K_DAY,
+            autype=AuType.QFQ,
+            max_count=bars
+        )
+        quote_ctx.close()
+        if ret == RET_OK and df_k is not None and not df_k.empty:
+            df = df_k.copy()
+            df.columns = [c.lower().strip() for c in df.columns]
+            time_col = 'time_key' if 'time_key' in df.columns else df.columns[0]
+            df['time_clean'] = df[time_col].astype(str).str.slice(0, 10)
+            df = df[['time_clean', 'open', 'high', 'low', 'close', 'volume']].drop_duplicates('time_clean').sort_values('time_clean').tail(bars).reset_index(drop=True)
+            
+            # 自動沉澱本地
+            try:
+                os.makedirs("./market_data", exist_ok=True)
+                df.to_csv(f"./market_data/{clean_code}_DAY.csv", index=False)
+            except Exception:
+                pass
+            return df
+    except Exception:
+        pass
+
+    # 3. 備用：yfinance 網絡拉取
     try:
         import yfinance as yf
         sym = code.replace("US.", "").replace("CC.", "").replace("HK.", "")
@@ -91,9 +87,8 @@ def fetch_daily_kline_safe(code: str, bars: int = 300) -> pd.DataFrame:
 
 def render_macro_radar_view(assets=None):
     """
-    12 檔宏觀雷達主入口：相容傳入 list / DataFrame，提供 TradingView 原生圖表與獨立圖層開關
+    12 檔宏觀雷達主入口：相容傳入 list / DataFrame / None，支援 TradingView 原生渲染與圖層控制
     """
-    # 1. 提取可選標的清單
     default_symbols = ["US.NVDA", "US.QQQ", "US.AAPL", "US.MSFT", "US.AMZN", "US.GOOGL", "US.META", "US.TSLA", "US.AVGO", "US.MU", "US.AMD", "US.WDC", "US.STX"]
     symbol_options = []
     
@@ -109,23 +104,23 @@ def render_macro_radar_view(assets=None):
     if not symbol_options:
         symbol_options = default_symbols
 
-    # 2. 標的選擇與長度控制
+    # 1. 標的選擇器與長度控制
     c_sel, c_bar = st.columns([3, 2])
     with c_sel:
         target_code = st.selectbox("🎯 選擇分析標的", symbol_options, index=0 if "US.NVDA" not in symbol_options else symbol_options.index("US.NVDA"))
     with c_bar:
-        bars_count = st.slider("🎛️ 歷史 K 線跨度 (Bars)", min_value=60, max_value=600, value=300, step=20)
+        bars_count = st.slider("🎛️ 歷史 K 線跨度 (Bars)", min_value=60, max_value=500, value=250, step=10)
 
-    # 3. 加載數據
+    # 2. 加載數據
     df = fetch_daily_kline_safe(target_code, bars=bars_count)
     if df.empty or len(df) < 15:
         st.warning(f"⚠️ 標的 {target_code} 暫無足夠日線數據，請確認本地 market_data 或 OpenD 連線。")
         return
 
-    # 4. 幾何運算
+    # 3. 幾何運算
     data = compute_radar_channel_and_markdown(df, ticker=target_code)
     if data["status"] != "success":
-        st.error(f"❌ 計算失敗: {data.get('msg')}")
+        st.error(f"❌ 通道計算失敗: {data.get('msg')}")
         return
 
     chan = data["macro_channel"]
@@ -134,12 +129,12 @@ def render_macro_radar_view(assets=None):
     rec_res = data["recent_res"]
     rec_sup = data["recent_sup"]
 
-    # 5. 頂部 HUD 狀態卡 (金融暗黑質感)
+    # 4. 頂部 HUD 狀態卡 (暗黑終端質感)
     st.markdown(
         f"""
         <div style="background-color: #0d1117; border: 1px solid #30363d; border-radius: 8px; padding: 12px 18px; margin-bottom: 12px; font-family: monospace;">
             <div style="font-size: 15px; font-weight: bold; color: #58a6ff;">
-                📊 {target_code} · 日線幾何通道與趨勢軌道 (John J. Murphy 體系)
+                📊 {target_code} · 純日線技術幾何通道 (John J. Murphy 體系)
             </div>
             <div style="margin-top: 6px; display: flex; flex-wrap: wrap; gap: 20px; font-size: 13px; color: #c9d1d9;">
                 <span>現價: <b style="color: #79c0ff;">${curr_p:.2f}</b></span>
@@ -152,7 +147,7 @@ def render_macro_radar_view(assets=None):
         unsafe_allow_html=True
     )
 
-    # 6. 繪圖圖層獨立 ON/OFF 開關
+    # 5. 繪圖圖層獨立 ON/OFF 開關
     st.markdown("##### 🎛️ 圖表繪圖圖層控制 (Drawing Toggles)")
     t1, t2, t3, t4 = st.columns(4)
     with t1:
@@ -164,7 +159,7 @@ def render_macro_radar_view(assets=None):
     with t4:
         show_markers = st.checkbox("🏷️ 極值點錨點標籤", value=True)
 
-    # 7. 序列化 TradingView 原生數據
+    # 6. 序列化 TradingView 原生數據
     candles_data = []
     for _, row in df.iterrows():
         candles_data.append({
@@ -204,7 +199,7 @@ def render_macro_radar_view(assets=None):
     sup_line_json = json.dumps(channel_sup_data)
     markers_json = json.dumps(markers_data)
 
-    # 8. TradingView Lightweight Charts HTML/JS 畫布注入
+    # 7. TradingView Lightweight Charts HTML/JS 畫布注入
     html_code = f"""
     <!DOCTYPE html>
     <html>
@@ -332,7 +327,7 @@ def render_macro_radar_view(assets=None):
 
     components.html(html_code, height=580)
 
-    # 9. AI 審計 Markdown 輸出框 (一鍵複製)
+    # 8. AI 審計 Markdown 輸出框 (一鍵複製)
     st.divider()
     st.markdown("#### 🤖 AI 策略軍師專用診斷 Markdown 日誌 (可直接複製發送給 AI)")
     st.caption("點擊下方右上角按鈕即可直接複製完整技術幾何數據，貼入 ChatGPT / Claude / Gemini 進行深度推演。")
