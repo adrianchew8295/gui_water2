@@ -1,5 +1,5 @@
 # 文件名: chart_view_plugin.py
-# 職責: 渲染 QQQ 納指大盤中樞 (支援 TradingView 原生 Extended Hours 盤前盤後半透明遮罩 · 時段開關 · 最高歷史深度)
+# 職責: 渲染 QQQ 納指大盤中樞 (原生 Python int 轉型 · 杜絕 int64 序列化異常 · 支援 TradingView 原生 Extended Hours 盤前盤後遮罩)
 
 import os
 import json
@@ -20,6 +20,14 @@ def check_and_auto_heal(code: str):
             hub_engine.auto_heal_today_data(code)
     except Exception:
         pass
+
+def safe_py_val(v):
+    """強制將 NumPy 數值轉為 Python 原生型別，杜絕 JSON 序列化報錯"""
+    if isinstance(v, (np.integer, int)):
+        return int(v)
+    if isinstance(v, (np.floating, float)):
+        return float(v)
+    return str(v)
 
 def load_kline_safe(code: str, ktype: str = "1H", bars: int = 1500) -> pd.DataFrame:
     """
@@ -56,10 +64,10 @@ def load_kline_safe(code: str, ktype: str = "1H", bars: int = 1500) -> pd.DataFr
                         df['is_ext'] = False
                     else:
                         df['time_val'] = df['dt'].astype('int64') // 10**9
-                        # 判定美東時間是否為盤前 (04:00~09:30) 或 盤後 (16:00~20:00)
                         hours = df['dt'].dt.hour
                         minutes = df['dt'].dt.minute
                         time_mins = hours * 60 + minutes
+                        # 04:00~09:30 (盤前) 或 16:00~20:00 (盤後)
                         df['is_ext'] = ((time_mins >= 240) & (time_mins < 570)) | ((time_mins >= 960) & (time_mins <= 1200))
                         
                     df['time_display'] = df['dt'].dt.strftime('%Y-%m-%d %H:%M')
@@ -116,7 +124,6 @@ def render_lightweight_tv_chart(code: str = "US.QQQ", ktype: str = "1H", bars: i
         unsafe_allow_html=True
     )
 
-    # 繪圖開關 (新增 Extended Hours 遮罩開關)
     t1, t2, t3, t4 = st.columns(4)
     with t1:
         show_ext = st.checkbox("🌙 盤前盤後遮罩 (Extended Hours)", value=True)
@@ -130,7 +137,7 @@ def render_lightweight_tv_chart(code: str = "US.QQQ", ktype: str = "1H", bars: i
     candles_data = []
     volume_data = []
     ema_data = []
-    ext_ranges = [] # 提取連續的 Extended Hours 區間
+    ext_ranges = []
     
     df['ema20'] = df['close'].ewm(span=20).mean()
     
@@ -138,7 +145,7 @@ def render_lightweight_tv_chart(code: str = "US.QQQ", ktype: str = "1H", bars: i
     ext_start = None
     
     for idx, row in df.iterrows():
-        t_val = row['time_val']
+        t_val = safe_py_val(row['time_val'])
         is_e = bool(row['is_ext'])
         
         candles_data.append({
@@ -159,21 +166,22 @@ def render_lightweight_tv_chart(code: str = "US.QQQ", ktype: str = "1H", bars: i
                 "value": round(float(row['ema20']), 2)
             })
 
-        # 區間聚合
         if is_e and not in_ext:
             in_ext = True
             ext_start = t_val
         elif not is_e and in_ext:
             in_ext = False
-            ext_ranges.append({"start": ext_start, "end": df.iloc[idx-1]['time_val']})
+            prev_val = safe_py_val(df.iloc[idx - 1]['time_val'])
+            ext_ranges.append({"start": ext_start, "end": prev_val})
             
-    if in_ext:
-        ext_ranges.append({"start": ext_start, "end": df.iloc[-1]['time_val']})
+    if in_ext and ext_start is not None:
+        last_val = safe_py_val(df.iloc[-1]['time_val'])
+        ext_ranges.append({"start": ext_start, "end": last_val})
 
-    candles_json = json.dumps(candles_data)
-    volume_json = json.dumps(volume_data)
-    ema_json = json.dumps(ema_data)
-    ext_ranges_json = json.dumps(ext_ranges)
+    candles_json = json.dumps(candles_data, default=safe_py_val)
+    volume_json = json.dumps(volume_data, default=safe_py_val)
+    ema_json = json.dumps(ema_data, default=safe_py_val)
+    ext_ranges_json = json.dumps(ext_ranges, default=safe_py_val)
 
     html_code = f"""
     <!DOCTYPE html>
