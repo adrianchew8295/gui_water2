@@ -1,10 +1,10 @@
 # 文件名: data_engine.py
 # 職責: 
-# 1. 導出 hub_engine, data_engine, get_active_session_info, LOG_PATH, get_moomoo_real_portfolio
-# 2. 抓取包含美東 04:00~20:00 全時段 5M 原始流
+# 1. 導出 hub_engine, get_active_session_info, LOG_PATH, get_moomoo_real_portfolio
+# 2. 鎖定最新 20 天倒序抓取 2026 年最新全時段 5M 原始流
 # 3. 本地 Pandas 100% 精準 Resample 聚合生成無斷層 1H CSV
 # 4. 提供 auto_heal_today_data 斷點自癒修復管道
-# 5. 倒序抓取真實不截斷日線 (DAY) 數據與實盤持倉查詢
+# 5. 倒序抓取真實日線 (DAY) 數據與實盤持倉查詢
 
 import os
 import time
@@ -144,8 +144,8 @@ class MarketDataHub:
         with open(WATCHLIST_PATH, "w", encoding="utf-8") as f:
             json.dump({"assets": assets_list}, f, ensure_ascii=False, indent=2)
 
-    def sync_asset_deep_history(self, code: str = "US.NVDA", bars_5m: int = 1500, bars_day: int = 300):
-        """核心同步管道：5M 全時段 + 1H Resample + DAY 倒序"""
+    def sync_asset_deep_history(self, code: str = "US.QQQ", bars_5m: int = 1500, bars_day: int = 300):
+        """核心同步管道：鎖定最近 20 天，確保拉取 2026 當前最新行情"""
         clean_code = code.replace('.', '_')
         p_5m = os.path.join(DATA_DIR, f"{clean_code}_5M.csv")
         p_1h = os.path.join(DATA_DIR, f"{clean_code}_1H.csv")
@@ -156,11 +156,14 @@ class MarketDataHub:
             quote_ctx = OpenQuoteContext(host='127.0.0.1', port=11111)
             now_ny = datetime.datetime.now(tz_ny)
             end_str = now_ny.strftime("%Y-%m-%d %H:%M:%S")
+            # 鎖定最近 20 天，杜絕被 OpenD 倒退到 2025 年
+            start_str_5m = (now_ny - datetime.timedelta(days=20)).strftime("%Y-%m-%d %H:%M:%S")
+            start_str_day = (now_ny - datetime.timedelta(days=400)).strftime("%Y-%m-%d %H:%M:%S")
 
-            # 1. 抓取 5M 全時段 (含 04:00~20:00)
+            # 1. 抓取 2026 當前最新 5M 全時段 (含 04:00~20:00)
             ret_5m, df_5m_raw, _ = quote_ctx.request_history_kline(
                 code=code,
-                start='',
+                start=start_str_5m,
                 end=end_str,
                 ktype=KLType.K_5M,
                 autype=AuType.QFQ,
@@ -174,10 +177,10 @@ class MarketDataHub:
                 df_1h = resample_5m_to_1h(df_5m)
                 df_1h.to_csv(p_1h, index=False)
 
-            # 2. 抓取日線數據
+            # 2. 抓取 2026 當前最新日線
             ret_day, df_day_raw, _ = quote_ctx.request_history_kline(
                 code=code,
-                start='',
+                start=start_str_day,
                 end=end_str,
                 ktype=KLType.K_DAY,
                 autype=AuType.QFQ,
@@ -216,7 +219,6 @@ class MarketDataHub:
             log_event(f"快照獲取異常: {str(e)}", "ERROR")
         return None
 
-# 全域單例實例導出
 hub_engine = MarketDataHub()
 data_engine = hub_engine
 
