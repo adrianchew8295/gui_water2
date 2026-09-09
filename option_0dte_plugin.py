@@ -1,5 +1,5 @@
 # 文件名: option_0dte_plugin.py
-# 职责: QQQ / 美股 0DTE 智能期权实战座舱 (全简体中文 · 左右紧凑双卡片 · 15M ORB + 2B 引擎 · 动态 Greeks · 5M复盘)
+# 职责: QQQ / 美股 0DTE 智能期权实战座舱 (全简体中文 · 左右紧凑双卡片 · 15M ORB + 2B 引擎 · 动态 Greeks · 真实数据复盘)
 
 import os
 import json
@@ -179,19 +179,16 @@ def analyze_0dte_tactical(df_5m: pd.DataFrame, df_day: pd.DataFrame, target_code
     curr_time_str = str(curr_bar['dt'])[:16]
     today_date_str = str(curr_bar['dt'])[:10]
 
-    # 1. 换棒倒计时
     current_sec = now_ny.minute * 60 + now_ny.second
     sec_to_next_5m = 300 - (current_sec % 300)
     timer_str = f"{sec_to_next_5m // 60:02d}:{sec_to_next_5m % 60:02d}"
 
-    # 2. 昨日极值 (PDH / PDL)
     pdh, pdl = curr_price * 1.008, curr_price * 0.992
     if not df_day.empty and len(df_day) >= 2:
         prev_day = df_day.iloc[-2]
         pdh = float(prev_day['high'])
         pdl = float(prev_day['low'])
 
-    # 3. 今日盘前极值 (PMH / PML)
     df_today = df_5m[df_5m['dt'].dt.strftime('%Y-%m-%d') == today_date_str]
     hours = df_today['dt'].dt.hour
     mins = df_today['dt'].dt.minute
@@ -205,7 +202,6 @@ def analyze_0dte_tactical(df_5m: pd.DataFrame, df_day: pd.DataFrame, target_code
         pmh = curr_price * 1.004
         pml = curr_price * 0.996
 
-    # 4. 15M ORB 开盘区间计算 (09:30~09:45 前 3 根 5M 柱)
     df_orb = df_today[(t_mins >= 570) & (t_mins <= 580)]
     if not df_orb.empty and len(df_orb) >= 2:
         orb_high = float(df_orb['high'].max())
@@ -215,22 +211,18 @@ def analyze_0dte_tactical(df_5m: pd.DataFrame, df_day: pd.DataFrame, target_code
         orb_low = curr_price * 0.998
     orb_mid = round((orb_high + orb_low) / 2.0, 2)
 
-    # 5. 近期 SBR / RBS
     recent_slice = df_5m.tail(30)
     sbr = float(recent_slice['high'].max())
     rbs = float(recent_slice['low'].min())
 
-    # 6. 5M 量能比 (VMA20)
     df_5m['vma20'] = df_5m['volume'].rolling(window=20).mean()
     curr_vol = float(curr_bar['volume'])
     vma20_val = float(df_5m['vma20'].iloc[-1]) if pd.notna(df_5m['vma20'].iloc[-1]) and df_5m['vma20'].iloc[-1] > 0 else 1.0
     vol_ratio = curr_vol / vma20_val
 
-    # 7. 差价计算
     dist_to_orb_high = orb_high - curr_price
     dist_to_orb_low = curr_price - orb_low
 
-    # 8. 双核策略判定
     prev_bar = df_5m.iloc[-2]
     risk_unit = max(0.60, abs(curr_bar['high'] - curr_bar['low']))
     
@@ -322,7 +314,6 @@ def analyze_0dte_tactical(df_5m: pd.DataFrame, df_day: pd.DataFrame, target_code
         tp_price = 0.0
         is_armed = False
 
-    # 10. 动态 Greeks 计算
     moneyness = curr_price - strike_price
     live_delta = round(0.50 + moneyness * 0.12, 2)
     live_delta = max(0.18, min(0.82, live_delta))
@@ -341,7 +332,6 @@ def analyze_0dte_tactical(df_5m: pd.DataFrame, df_day: pd.DataFrame, target_code
     opt_sl_price = round(est_opt_premium * 0.65, 2)
     opt_tp_price = round(est_opt_premium * 1.70, 2)
 
-    # 过去 6 根 5M 量价流水 (置顶第一行)
     recent_6_bars = []
     df_slice_desc = df_5m.tail(6).iloc[::-1].reset_index(drop=True)
     for idx, b in df_slice_desc.iterrows():
@@ -409,7 +399,6 @@ def render_0dte_live_fragment(target_code: str, budget_input: float):
 
     now_clock = datetime.datetime.now(tz_my).strftime('%H:%M:%S')
 
-    # 1. 顶部心跳条 (带 15M ORB 数据)
     st.markdown(
         f"""
         <div style="background-color: #0d1117; border: 1px solid #30363d; border-radius: 8px; padding: 10px 16px; margin-bottom: 12px; font-family: monospace;">
@@ -428,11 +417,9 @@ def render_0dte_live_fragment(target_code: str, budget_input: float):
         unsafe_allow_html=True
     )
 
-    # 2. 左右并排紧凑双卡片 (50% : 50% 对齐)
     c_left, c_right = st.columns([1, 1])
 
     with c_left:
-        # 左卡：战术指令与期权执行
         if data['is_armed']:
             strike_html = f"<div style='font-size: 24px; font-weight: bold; color: #ffd600;'>${data['strike_price']} {data['opt_type']}</div>"
             code_html = f"<div style='font-size: 15px; font-weight: bold; color: #58a6ff;'>{data['opt_symbol']}</div>"
@@ -470,7 +457,6 @@ def render_0dte_live_fragment(target_code: str, budget_input: float):
         )
 
     with c_right:
-        # 右卡：边界空间测算与 Greeks 呼吸仪表盘
         st.markdown(
             f"""
             <div style="background-color: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 14px 18px; height: 160px; font-family: monospace; display: flex; flex-direction: column; justify-content: space-between;">
@@ -495,13 +481,12 @@ def render_0dte_live_fragment(target_code: str, budget_input: float):
 
     st.markdown("<div style='height: 8px;'></div>", unsafe_allow_html=True)
 
-    # 3. 5M 历史柱滚动流水表
     st.markdown("##### 📊 5M 实时量价核心表 (最新时段强制置顶 · 过去 30 分钟黄金窗口)")
     df_recent = pd.DataFrame(data['recent_6_bars'])
     st.dataframe(df_recent, use_container_width=True, hide_index=True)
 
 def _load_kline_replay_slice(code: str, entry_date_str: str, entry_time_str: str, entry_p: float):
-    """加载做功课指定时段前后 30 分钟真实 5M K 线切片"""
+    """加载真实 5M K线切片 (彻底剔除虚拟梳子假线)"""
     clean_code = code.replace('.', '_')
     candidates = [
         os.path.join(DATA_DIR, f"{clean_code}_5M.csv"),
@@ -528,11 +513,11 @@ def _load_kline_replay_slice(code: str, entry_date_str: str, entry_time_str: str
             except Exception:
                 pass
 
-    times = [f"{i:02d}:00" for i in range(10, 40)]
-    return times, [entry_p]*30, [entry_p+1.5]*30, [entry_p-1.5]*30, [entry_p]*30, [100.0]*30, 15
+    # 找不到真实数据时，返回空列表，绝不生成梳子假线
+    return [], [], [], [], [], [], -1
 
 def render_interactive_replay_chart(trade_row: pd.Series):
-    """做功课专属 Plotly 5M 互动图表 (支持 ORB 箱体叠加)"""
+    """做功课专属 Plotly 5M 真实互动图表"""
     entry_p = float(trade_row.get('entry', 0.0))
     sl_p = float(trade_row.get('sl', 0.0))
     tp_p = float(trade_row.get('tp', 0.0))
@@ -547,6 +532,11 @@ def render_interactive_replay_chart(trade_row: pd.Series):
     code = str(trade_row.get('code', 'US.QQQ'))
 
     times, opens, highs, lows, closes, volumes, entry_idx = _load_kline_replay_slice(code, date_str, time_str, entry_p)
+    
+    if not times:
+        st.warning(f"⚠️ 未在本地 5M 历史文件中检索到 {date_str} 的真实切片数据（该日期已超出本地 5M 历史缓存范围）。")
+        return
+
     exit_idx = min(len(times) - 1, entry_idx + 6) if entry_idx >= 0 else -1
     exit_p = float(trade_row.get('exit_price', entry_p))
     exit_label = "🎯 命中 2R 止盈 (+2.0R)" if is_win else "🛡️ 触发止损出场 (-1.0R)"
@@ -614,16 +604,16 @@ def render_interactive_replay_chart(trade_row: pd.Series):
     st.plotly_chart(fig, use_container_width=True, config={'scrollZoom': True, 'displayModeBar': True})
 
 def render_0dte_journal_tab(target_code: str):
-    """Tab 2：0DTE 专属做功课与记账复盘机 (全简体中文)"""
+    """Tab 2：0DTE 专属做功课与记账复盘机 (纯真实数据)"""
     df_all = pd.read_csv(JOURNAL_CSV) if os.path.exists(JOURNAL_CSV) else pd.DataFrame()
     df = df_all[df_all['code'] == target_code] if (not df_all.empty and 'code' in df_all.columns) else df_all
 
-    base_months = ["2026-09", "2026-08"]
+    # 动态获取有真实数据的月份
     if not df.empty and 'month' in df.columns:
-        existing_m = [str(x) for x in df['month'].dropna().unique()]
-        month_list = ["📅 今天 (实盘 Live 信号)"] + sorted(list(set(base_months + existing_m)), reverse=True)
+        existing_m = sorted([str(x) for x in df['month'].dropna().unique()], reverse=True)
+        month_list = ["📅 今天 (实盘 Live 信号)"] + existing_m
     else:
-        month_list = ["📅 今天 (实盘 Live 信号)"] + base_months
+        month_list = ["📅 今天 (实盘 Live 信号)", "2026-09", "2026-08"]
 
     col_m1, col_m2 = st.columns([2, 3])
     with col_m1:
