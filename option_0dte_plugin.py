@@ -1,5 +1,5 @@
 # 文件名: option_0dte_plugin.py
-# 職責: QQQ / 美股 0DTE 智能期權實戰座艙 (實時動態 Greeks 呼吸計算 · 內存實時穿透 · 空間差價即時追蹤 · 雙 Tab 結構)
+# 職責: QQQ / 美股 0DTE 智能期權實戰座艙 (自動無縫補齊斷層 5M 柱 · 消除 11點至最新空缺 · 精準量能計算 · 雙 Tab 結構)
 
 import os
 import json
@@ -49,7 +49,9 @@ def init_0dte_journal_file():
 init_0dte_journal_file()
 
 def load_0dte_kline_live(code: str = "US.QQQ"):
-    """加載 5M 數據並注入 OpenD 最新即時跳動點位"""
+    """
+    加載 5M 數據並自動修復時間斷層 (自動連續拉取至當下最新時段)
+    """
     clean_code = code.replace('.', '_')
     p_5m = os.path.join(DATA_DIR, f"{clean_code}_5M.csv")
     p_day = os.path.join(DATA_DIR, f"{clean_code}_DAY.csv")
@@ -79,36 +81,32 @@ def load_0dte_kline_live(code: str = "US.QQQ"):
         except Exception:
             pass
 
-    # 即時快照注入
-    try:
-        snap_df = hub_engine.get_realtime_snapshot([code])
-        if snap_df is not None and not snap_df.empty:
-            row = snap_df.iloc[0]
-            live_price = float(row.get('last_price', row.get('cur_price', 0.0)))
-            if live_price > 0:
-                now_ny = datetime.datetime.now(tz_ny)
-                cur_min = (now_ny.minute // 5) * 5
-                live_5m_dt = now_ny.replace(minute=cur_min, second=0, microsecond=0).replace(tzinfo=None)
-                
-                if not df_5m.empty:
-                    last_row_dt = df_5m.iloc[-1]['dt']
-                    if last_row_dt == live_5m_dt:
-                        df_5m.at[df_5m.index[-1], 'close'] = live_price
-                        df_5m.at[df_5m.index[-1], 'high'] = max(df_5m.at[df_5m.index[-1], 'high'], live_price)
-                        df_5m.at[df_5m.index[-1], 'low'] = min(df_5m.at[df_5m.index[-1], 'low'], live_price)
-                    elif live_5m_dt > last_row_dt:
-                        new_k = {
-                            'dt': live_5m_dt,
-                            'time_key': live_5m_dt.strftime('%Y-%m-%d %H:%M:%S'),
-                            'open': live_price,
-                            'high': live_price,
-                            'low': live_price,
-                            'close': live_price,
-                            'volume': float(row.get('volume', 1000.0))
-                        }
-                        df_5m = pd.concat([df_5m, pd.DataFrame([new_k])], ignore_index=True)
-    except Exception:
-        pass
+    # 核心修復：斷層偵測與自動全量接力 (Gap Detector & Auto-Sync)
+    now_ny = datetime.datetime.now(tz_ny)
+    now_ny_naive = now_ny.replace(tzinfo=None)
+    
+    needs_full_sync = False
+    if df_5m.empty:
+        needs_full_sync = True
+    else:
+        last_dt = df_5m.iloc[-1]['dt']
+        # 若最後一根 K 線與當前相差超過 10 分鐘，主動調用 OpenD 進行連續增量補齊
+        if (now_ny_naive - last_dt).total_seconds() > 600:
+            needs_full_sync = True
+
+    if needs_full_sync:
+        try:
+            hub_engine.sync_asset_deep_history(code=code, bars_5m=1500, bars_day=300)
+            if os.path.exists(p_5m):
+                df_re = pd.read_csv(p_5m)
+                df_re.columns = [c.lower().strip() for c in df_re.columns]
+                t_col = 'time_key' if 'time_key' in df_re.columns else df_re.columns[0]
+                df_re['dt'] = pd.to_datetime(df_re[t_col])
+                for col in ['open', 'high', 'low', 'close', 'volume']:
+                    df_re[col] = pd.to_numeric(df_re[col], errors='coerce')
+                df_5m = df_re.dropna().drop_duplicates('dt').sort_values('dt').reset_index(drop=True)
+        except Exception:
+            pass
 
     return df_5m, df_day
 
@@ -135,7 +133,7 @@ def analyze_0dte_tactical(df_5m: pd.DataFrame, df_day: pd.DataFrame, target_code
         pdh = float(prev_day['high'])
         pdl = float(prev_day['low'])
 
-    # 3. 今日盤前極值 (PMH / PML - 盤後固定標尺)
+    # 3. 今日盤前極值 (PMH / PML)
     df_today = df_5m[df_5m['dt'].dt.strftime('%Y-%m-%d') == today_date_str]
     hours = df_today['dt'].dt.hour
     mins = df_today['dt'].dt.minute
@@ -160,7 +158,7 @@ def analyze_0dte_tactical(df_5m: pd.DataFrame, df_day: pd.DataFrame, target_code
     vma20_val = float(df_5m['vma20'].iloc[-1]) if pd.notna(df_5m['vma20'].iloc[-1]) and df_5m['vma20'].iloc[-1] > 0 else 1.0
     vol_ratio = curr_vol / vma20_val
 
-    # 6. 動態差價 (每秒實時跳動)
+    # 6. 動態差價
     target_support = min(pml, rbs)
     target_resistance = max(pmh, sbr)
     dist_to_support = curr_price - target_support
@@ -178,16 +176,15 @@ def analyze_0dte_tactical(df_5m: pd.DataFrame, df_day: pd.DataFrame, target_code
 
     risk_unit = max(0.60, abs(curr_bar['high'] - curr_bar['low']))
 
-    # 8. 動態 Greeks 實時計算模型 (現價每跳動 1 分錢，Greeks 即時呼吸)
+    # 8. 動態 Greeks 實時計算
     nearest_atm_strike = int(round(curr_price))
-    moneyness = curr_price - nearest_atm_strike # 現價相對於平值的偏離
-    live_delta = round(0.50 + moneyness * 0.12, 2) # 隨現價微幅動態浮動
+    moneyness = curr_price - nearest_atm_strike
+    live_delta = round(0.50 + moneyness * 0.12, 2)
     live_delta = max(0.20, min(0.80, live_delta))
     
-    # 剩餘小時數計算 Theta 加速度
     cur_hour = now_ny.hour + now_ny.minute / 60.0
     hours_left = max(0.5, 16.0 - cur_hour) if cur_hour <= 16.0 else 0.5
-    live_theta = round(-0.45 * (6.5 / hours_left)**0.5, 2) # 越接近尾盤衰減越快
+    live_theta = round(-0.45 * (6.5 / hours_left)**0.5, 2)
     live_gamma = round(0.08 + (6.5 / hours_left) * 0.01, 2)
     live_iv = round(17.5 + abs(moneyness) * 0.8, 1)
 
@@ -233,7 +230,7 @@ def analyze_0dte_tactical(df_5m: pd.DataFrame, df_day: pd.DataFrame, target_code
     opt_sl_price = round(est_opt_premium * 0.65, 2)
     opt_tp_price = round(est_opt_premium * 1.70, 2)
 
-    # 過去 6 根 5M 量價流水 (置頂第一行)
+    # 過去 6 根 5M 量價流水 (置頂第一行，連續無斷層)
     recent_6_bars = []
     df_slice_desc = df_5m.tail(6).iloc[::-1].reset_index(drop=True)
     for idx, b in df_slice_desc.iterrows():
@@ -288,7 +285,7 @@ def analyze_0dte_tactical(df_5m: pd.DataFrame, df_day: pd.DataFrame, target_code
 
 @st.fragment(run_every=3.0)
 def render_0dte_live_fragment(target_code: str, budget_input: float):
-    """Tab 1：0DTE 即時射控艙 (3秒內存無感平滑刷新)"""
+    """Tab 1：0DTE 即時射控艙 (3秒局部平滑刷新)"""
     df_5m, df_day = load_0dte_kline_live(target_code)
     if df_5m.empty:
         st.warning(f"⚠️ {target_code} 暫無 5M 本地數據，請在終端執行 `python sync_history.py`。")
@@ -301,7 +298,7 @@ def render_0dte_live_fragment(target_code: str, budget_input: float):
 
     now_clock = datetime.datetime.now(tz_my).strftime('%H:%M:%S')
 
-    # 1. 頂部狀態列 (附帶秒級心跳標記)
+    # 1. 頂部狀態列
     st.markdown(
         f"""
         <div style="background-color: #0d1117; border: 1px solid #30363d; border-radius: 8px; padding: 10px 16px; margin-bottom: 12px; font-family: monospace;">
@@ -320,7 +317,7 @@ def render_0dte_live_fragment(target_code: str, budget_input: float):
         unsafe_allow_html=True
     )
 
-    # 2. 核心指令卡 (動態差價即時反映)
+    # 2. 核心指令卡
     if data['is_armed']:
         strike_html = f"<div style='font-size: 26px; font-weight: bold; color: #ffd600;'>${data['strike_price']} {data['opt_type']}</div>"
         code_html = f"<div style='font-size: 16px; font-weight: bold; color: #58a6ff;'>{data['opt_symbol']}</div>"
@@ -361,7 +358,7 @@ def render_0dte_live_fragment(target_code: str, budget_input: float):
         unsafe_allow_html=True
     )
 
-    # 3. Greeks 儀表盤 (隨正股現價即時動態呼吸)
+    # 3. Greeks 儀表盤
     st.markdown(
         f"""
         <div style="background-color: #161b22; border: 1px solid #30363d; border-radius: 6px; padding: 10px 16px; margin-bottom: 14px; font-family: monospace;">
@@ -378,8 +375,8 @@ def render_0dte_live_fragment(target_code: str, budget_input: float):
         unsafe_allow_html=True
     )
 
-    # 4. 5M 歷史柱滾動流水
-    st.markdown("##### 📊 5M 即時量價核心表 (最新時段強制置頂 · 每 3 秒動態生長)")
+    # 4. 5M 歷史柱滾動流水 (連續無斷層)
+    st.markdown("##### 📊 5M 即時量價核心表 (最新時段強制置頂 · 連續無斷層)")
     df_recent = pd.DataFrame(data['recent_6_bars'])
     st.dataframe(df_recent, use_container_width=True, hide_index=True)
 
@@ -584,7 +581,7 @@ def render_0dte_cockpit_view(assets=None):
         st.markdown("<div style='height: 28px;'></div>", unsafe_allow_html=True)
         if st.button("⚡ 手動立即抓取最新 (Sync Now)", use_container_width=True):
             try:
-                hub_engine.auto_heal_today_data(target_code)
+                hub_engine.sync_asset_deep_history(target_code, bars_5m=1500, bars_day=300)
                 st.rerun()
             except Exception:
                 pass
