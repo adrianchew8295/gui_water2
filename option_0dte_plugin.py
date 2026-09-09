@@ -1,5 +1,5 @@
 # 文件名: option_0dte_plugin.py
-# 職責: QQQ / 美股 0DTE 智能期權實戰座艙 + 專屬做功課記帳復盤機 (最新時段強制置頂 · 待機雷達差價 · 5M 技術還原圖 · 自動落盤 CSV)
+# 職責: QQQ / 美股 0DTE 智能期權實戰座艙 (活水數據自癒 · 3秒無感局部輪詢 · 最新時段強制置頂 · Greeks 儀表盤 · 雙 Tab 結構)
 
 import os
 import json
@@ -65,6 +65,7 @@ def load_0dte_kline_context(code: str = "US.QQQ"):
     df_5m = pd.DataFrame()
     df_day = pd.DataFrame()
 
+    # 自動檢查是否需要補齊數據 (Gap Detector)
     if os.path.exists(p_5m):
         try:
             df = pd.read_csv(p_5m)
@@ -74,6 +75,16 @@ def load_0dte_kline_context(code: str = "US.QQQ"):
             for col in ['open', 'high', 'low', 'close', 'volume']:
                 df[col] = pd.to_numeric(df[col], errors='coerce')
             df_5m = df.dropna().drop_duplicates('dt').sort_values('dt').reset_index(drop=True)
+            
+            # 若最新一根 K 線距離現在超過 5 分鐘，自動在後台進行一次輕量補齊
+            if not df_5m.empty:
+                last_dt = df_5m.iloc[-1]['dt']
+                now_ny = datetime.datetime.now(tz_ny).replace(tzinfo=None)
+                if (now_ny - last_dt).total_seconds() > 300:
+                    try:
+                        hub_engine.auto_heal_today_data(code)
+                    except Exception:
+                        pass
         except Exception:
             pass
 
@@ -90,7 +101,7 @@ def load_0dte_kline_context(code: str = "US.QQQ"):
     return df_5m, df_day
 
 def auto_log_0dte_signal(target_code: str, curr_time_str: str, curr_price: float, sl_price: float, tp_price: float, opt_symbol: str, strike_price: int, opt_type: str, vol_ratio: float, reason: str):
-    """將盤中觸發的 0DTE 開火訊號自動存入 CSV 帳本"""
+    """自動記錄訊號至 CSV"""
     try:
         df_j = pd.read_csv(JOURNAL_CSV) if os.path.exists(JOURNAL_CSV) else pd.DataFrame()
         date_str = curr_time_str[:10]
@@ -184,7 +195,7 @@ def analyze_0dte_tactical(df_5m: pd.DataFrame, df_day: pd.DataFrame, target_code
     vma20_val = float(df_5m['vma20'].iloc[-1]) if pd.notna(df_5m['vma20'].iloc[-1]) and df_5m['vma20'].iloc[-1] > 0 else 1.0
     vol_ratio = curr_vol / vma20_val
 
-    # 6. 計算距離關鍵邊界的動態差價 (消除 Standstill 盲區)
+    # 6. 差價計算
     target_support = min(pml, rbs)
     target_resistance = max(pmh, sbr)
     dist_to_support = curr_price - target_support
@@ -262,7 +273,7 @@ def analyze_0dte_tactical(df_5m: pd.DataFrame, df_day: pd.DataFrame, target_code
         opt_sl_price = 0.00
         opt_tp_price = 0.00
 
-    # 8. 過去 6 根 5M 量價流水（強制降序倒序排列：最新時段置頂 Top Row）
+    # 8. 過去 6 根 5M 量價流水 (最新時段強制置頂 Top Row)
     recent_6_bars = []
     df_slice_desc = df_5m.tail(6).iloc[::-1].reset_index(drop=True)
     for idx, b in df_slice_desc.iterrows():
@@ -358,12 +369,14 @@ def render_0dte_live_fragment(target_code: str, budget_input: float):
         st.error(f"❌ 計算失敗: {data.get('msg')}")
         return
 
+    now_clock = datetime.datetime.now(tz_my).strftime('%H:%M:%S')
+
     # 頂部狀態列
     st.markdown(
         f"""
         <div style="background-color: #0d1117; border: 1px solid #30363d; border-radius: 8px; padding: 10px 16px; margin-bottom: 12px; font-family: monospace;">
             <div style="font-size: 14px; font-weight: bold; color: #58a6ff; display: flex; justify-content: space-between; align-items: center;">
-                <span>⚡ {target_code} · 0DTE 日內期權戰術射控艙</span>
+                <span>⚡ {target_code} · 0DTE 日內期權戰術射控艙 <span style="font-size: 11px; color: #00e676;">● 實時輪詢中 ({now_clock} MYT)</span></span>
                 <span style="font-size: 13px; color: #ffd600;">⏱️ 距離下根 5M 定格換棒: <b>{data['timer_str']}</b></span>
             </div>
             <div style="margin-top: 6px; display: flex; flex-wrap: wrap; gap: 20px; font-size: 13px; color: #c9d1d9;">
@@ -435,7 +448,7 @@ def render_0dte_live_fragment(target_code: str, budget_input: float):
         unsafe_allow_html=True
     )
 
-    # 5M 歷史柱滾動流水（強制最新置頂）
+    # 5M 歷史柱滾動流水（強制最新置頂 Top Row）
     st.markdown("##### 📊 5M 即時量價核心表 (最新時段強制置頂 · 過去 30 分鐘黃金窗口)")
     df_recent = pd.DataFrame(data['recent_6_bars'])
     st.dataframe(df_recent, use_container_width=True, hide_index=True)
@@ -682,11 +695,19 @@ def render_0dte_cockpit_view(assets=None):
     if not symbol_options:
         symbol_options = default_symbols
 
-    c1, c2 = st.columns([3, 2])
+    c1, c2, c3 = st.columns([3, 2, 2])
     with c1:
         target_code = st.selectbox("🎯 選擇 0DTE 標的", symbol_options, index=0)
     with c2:
         budget_input = st.number_input("💰 單筆期權預算上限 (USD)", min_value=50.0, max_value=5000.0, value=200.0, step=50.0)
+    with c3:
+        st.markdown("<div style='height: 28px;'></div>", unsafe_allow_html=True)
+        if st.button("⚡ 手動立即抓取最新 (Sync Now)", use_container_width=True):
+            try:
+                hub_engine.auto_heal_today_data(target_code)
+                st.rerun()
+            except Exception:
+                pass
 
     tab_live, tab_journal = st.tabs(["⚡ 0DTE 即時射控座艙", "📊 0DTE 策略記帳與做功課"])
     with tab_live:
