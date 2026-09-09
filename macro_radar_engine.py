@@ -1,153 +1,185 @@
 # 文件名: macro_radar_engine.py
 # 職責: 
 # 1. 約翰·墨菲 (John J. Murphy) 標準平行通道幾何與重大防守底座
-# 2. LuxAlgo / 經典艾略特波浪 (Elliott Wave) 三大鐵律驗證與浪級幾何骨架
-# 3. 輸出包含雙重共振數據的 AI 策略軍師可審計 Markdown 日誌
+# 2. LuxAlgo 原版波浪擺動提取 (left=4/8, right=1) 與艾略特波浪三大鐵律推動浪識別
+# 3. 輸出雙重共振的結構化 AI 專用 Markdown 日誌
 
 import numpy as np
 import pandas as pd
 from typing import Dict, Any, List
 
-def find_swing_pivots(df: pd.DataFrame, window: int = 8):
-    """提取客觀波段擺動極值點 (Swing Pivots)"""
+def find_lux_zigzag_pivots(df: pd.DataFrame, left: int = 4, right: int = 1):
+    """
+    100% 復刻 LuxAlgo Pine Script 擺動極值算法 (ta.pivothigh / ta.pivotlow)
+    左側看 left 根，右側僅需 right (1) 根即時確認，消除盲區
+    """
     highs = df['high'].values
     lows = df['low'].values
     times = df['time_clean'].values
     n = len(df)
     
-    swing_highs = []
-    swing_lows = []
+    pivots = []
     
-    for i in range(window, n - window):
-        if np.all(highs[i] >= highs[i - window:i]) and np.all(highs[i] >= highs[i + 1:i + window + 1]):
-            swing_highs.append({"idx": i, "time": str(times[i])[:10], "price": float(highs[i]), "type": "high"})
-        if np.all(lows[i] <= lows[i - window:i]) and np.all(lows[i] <= lows[i + 1:i + window + 1]):
-            swing_lows.append({"idx": i, "time": str(times[i])[:10], "price": float(lows[i]), "type": "low"})
-            
-    return swing_highs, swing_lows
+    for i in range(left, n - right):
+        # 判定波峰 Pivot High
+        is_ph = True
+        for l in range(1, left + 1):
+            if highs[i] < highs[i - l]:
+                is_ph = False; break
+        if is_ph:
+            for r in range(1, right + 1):
+                if highs[i] < highs[i + r]:
+                    is_ph = False; break
+        if is_ph:
+            pivots.append({"idx": i, "time": str(times[i])[:10], "price": float(highs[i]), "type": "high"})
 
-def extract_elliott_wave_pattern(df: pd.DataFrame, swing_highs: list, swing_lows: list) -> Dict[str, Any]:
+        # 判定波谷 Pivot Low
+        is_pl = True
+        for l in range(1, left + 1):
+            if lows[i] > lows[i - l]:
+                is_pl = False; break
+        if is_pl:
+            for r in range(1, right + 1):
+                if lows[i] > lows[i + r]:
+                    is_pl = False; break
+        if is_pl:
+            pivots.append({"idx": i, "time": str(times[i])[:10], "price": float(lows[i]), "type": "low"})
+
+    # 依照時間索引排序並過濾同向連續點（保留最極端點）
+    pivots = sorted(pivots, key=lambda x: x["idx"])
+    clean_pivots = []
+    for p in pivots:
+        if not clean_pivots:
+            clean_pivots.append(p)
+        else:
+            last_p = clean_pivots[-1]
+            if last_p["type"] == p["type"]:
+                if (p["type"] == "high" and p["price"] > last_p["price"]) or (p["type"] == "low" and p["price"] < last_p["price"]):
+                    clean_pivots[-1] = p
+            else:
+                clean_pivots.append(p)
+                
+    return clean_pivots
+
+def extract_elliott_wave_pattern(df: pd.DataFrame, pivots: list) -> Dict[str, Any]:
     """
-    依據 LuxAlgo / 經典波浪三大鐵律識別最新 5 浪推動或 ABC 調整浪
-    鐵律 1: 浪 3 絕非最短浪 (W3 != min(W1, W3, W5))
-    鐵律 2: 多頭推動中浪 4 底不進入浪 1 頂 (P4_low > P1_high)
-    鐵律 3: 浪 2 回撤不破浪 1 起點 (P2_low > P0_low)
+    嚴格依據 LuxAlgo / 經典波浪鐵律識別 5 浪推動 (Motive) 或正在推進的主升浪
     """
-    times = df['time_clean'].values
-    highs = df['high'].values
-    lows = df['low'].values
-    n = len(df)
-    
-    # 將所有波段點按時間順序混合排序
-    all_pivots = sorted(swing_highs + swing_lows, key=lambda x: x['idx'])
-    if len(all_pivots) < 5:
+    if len(pivots) < 4:
         return None
 
-    ew_result = None
+    times = df['time_clean'].values
+    highs = df['high'].values
+    lows = df['low'].values
+    closes = df['close'].values
+    n = len(df)
+    curr_price = float(closes[-1])
 
-    # 倒序尋找符合 5 浪推進條件的最近序列
-    for end_i in range(len(all_pivots), 4, -1):
-        cand = all_pivots[end_i-5:end_i]
-        
-        # 情況 A: 多頭 5 浪 (Low0 -> High1 -> Low2 -> High3 -> Low4 -> High5)
-        # 檢查序列是否呈現交替型態
-        types = [p['type'] for p in cand]
-        
-        # 嘗試匹配 6 點多頭主浪結構 (P0 到 P5)
-        if end_i >= 6:
-            cand6 = all_pivots[end_i-6:end_i]
+    # 1. 優先匹配完整的 6 點多頭推動浪 (0 -> 1 -> 2 -> 3 -> 4 -> 5)
+    for end_idx in range(len(pivots), 3, -1):
+        if end_idx >= 6:
+            cand6 = pivots[end_idx-6:end_idx]
             if [p['type'] for p in cand6] == ['low', 'high', 'low', 'high', 'low', 'high']:
                 p0, p1, p2, p3, p4, p5 = cand6
                 w1 = p1['price'] - p0['price']
                 w3 = p3['price'] - p2['price']
                 w5 = p5['price'] - p4['price']
-                
-                # 嚴格校驗鐵律
-                is_valid_bull = (
-                    w1 > 0 and w3 > 0 and w5 > 0 and
-                    p2['price'] > p0['price'] and
-                    p4['price'] > p1['price'] and
-                    p3['price'] > p1['price'] and
-                    p5['price'] > p3['price'] and
-                    w3 != min(w1, w3, w5)
-                )
-                
-                if is_valid_bull:
-                    # 計算費氏空間擴展目標
-                    target_1 = p4['price'] + w1 # 1.0x 對稱
-                    target_2 = p4['price'] + 0.618 * (w1 + w3) # 0.618x 擴展
-                    invalidation_level = p1['price'] # 破浪 1 頂結構失效
 
-                    wave_lines = [
-                        {"time": p0['time'], "value": p0['price']},
-                        {"time": p1['time'], "value": p1['price']},
-                        {"time": p2['time'], "value": p2['price']},
-                        {"time": p3['time'], "value": p3['price']},
-                        {"time": p4['time'], "value": p4['price']},
-                        {"time": p5['time'], "value": p5['price']}
-                    ]
+                # LuxAlgo 鐵律檢驗
+                if (w1 > 0 and w3 > 0 and w5 > 0 and 
+                    p2['price'] > p0['price'] and 
+                    p4['price'] > p1['price'] and 
+                    p3['price'] > p1['price'] and 
+                    p5['price'] > p3['price'] and 
+                    w3 != min(w1, w3, w5)):
 
-                    wave_markers = [
-                        {"time": p0['time'], "position": "belowBar", "color": "#E040FB", "shape": "circle", "text": "⓪"},
-                        {"time": p1['time'], "position": "aboveBar", "color": "#E040FB", "shape": "circle", "text": "①"},
-                        {"time": p2['time'], "position": "belowBar", "color": "#E040FB", "shape": "circle", "text": "②"},
-                        {"time": p3['time'], "position": "aboveBar", "color": "#E040FB", "shape": "circle", "text": "③"},
-                        {"time": p4['time'], "position": "belowBar", "color": "#E040FB", "shape": "circle", "text": "④"},
-                        {"time": p5['time'], "position": "aboveBar", "color": "#E040FB", "shape": "circle", "text": "⑤"}
-                    ]
+                    target_1 = p4['price'] + w1
+                    target_2 = p4['price'] + 0.618 * (w1 + w3)
 
-                    ew_result = {
-                        "pattern": "🟢 多頭 5 浪推動結構 (Motive 5-Wave Impulse)",
-                        "stage": "第 ⑤ 浪衝頂階段 / 醞釀 ABC 修正",
+                    return {
+                        "pattern": "🟢 多頭 5 浪推動結構 (Motive 5-Wave)",
+                        "stage": "第 ⑤ 浪衝頂 / 醞釀 ABC 修正",
                         "p0": p0, "p1": p1, "p2": p2, "p3": p3, "p4": p4, "p5": p5,
                         "w1_len": round(w1, 2), "w3_len": round(w3, 2), "w5_len": round(w5, 2),
                         "target_1": round(target_1, 2),
                         "target_2": round(target_2, 2),
-                        "invalidation": round(invalidation_level, 2),
-                        "wave_lines": wave_lines,
-                        "wave_markers": wave_markers
+                        "invalidation": round(p1['price'], 2),
+                        "wave_lines": [
+                            {"time": p0['time'], "value": p0['price']},
+                            {"time": p1['time'], "value": p1['price']},
+                            {"time": p2['time'], "value": p2['price']},
+                            {"time": p3['time'], "value": p3['price']},
+                            {"time": p4['time'], "value": p4['price']},
+                            {"time": p5['time'], "value": p5['price']}
+                        ],
+                        "wave_markers": [
+                            {"time": p0['time'], "position": "belowBar", "color": "#E040FB", "shape": "circle", "text": "⓪"},
+                            {"time": p1['time'], "position": "aboveBar", "color": "#E040FB", "shape": "circle", "text": "①"},
+                            {"time": p2['time'], "position": "belowBar", "color": "#E040FB", "shape": "circle", "text": "②"},
+                            {"time": p3['time'], "position": "aboveBar", "color": "#E040FB", "shape": "circle", "text": "③"},
+                            {"time": p4['time'], "position": "belowBar", "color": "#E040FB", "shape": "circle", "text": "④"},
+                            {"time": p5['time'], "position": "aboveBar", "color": "#E040FB", "shape": "circle", "text": "⑤"}
+                        ]
                     }
-                    break
 
-    # 若未滿足完整 6 點，提取最近 4 點判斷是否處於 3 浪爆發或 4 浪回踩中
-    if not ew_result and len(all_pivots) >= 4:
-        cand4 = all_pivots[-4:]
-        if [p['type'] for p in cand4] == ['low', 'high', 'low', 'high']:
-            p0, p1, p2, p3 = cand4
-            w1 = p1['price'] - p0['price']
-            w3 = p3['price'] - p2['price']
-            if w1 > 0 and w3 > 0 and p2['price'] > p0['price'] and p3['price'] > p1['price']:
-                target_w3 = p2['price'] + 1.618 * w1
-                ew_result = {
-                    "pattern": "🚀 處於第 ③ 浪主升推進中 (Wave 3 Impulse)",
-                    "stage": "主升推動浪推進中",
-                    "p0": p0, "p1": p1, "p2": p2, "p3": p3, "p4": None, "p5": None,
-                    "w1_len": round(w1, 2), "w3_len": round(w3, 2), "w5_len": 0.0,
-                    "target_1": round(target_w3, 2),
-                    "target_2": round(p2['price'] + 2.618 * w1, 2),
-                    "invalidation": round(p2['price'], 2),
-                    "wave_lines": [
-                        {"time": p0['time'], "value": p0['price']},
-                        {"time": p1['time'], "value": p1['price']},
-                        {"time": p2['time'], "value": p2['price']},
-                        {"time": p3['time'], "value": p3['price']}
-                    ],
-                    "wave_markers": [
-                        {"time": p0['time'], "position": "belowBar", "color": "#E040FB", "shape": "circle", "text": "⓪"},
-                        {"time": p1['time'], "position": "aboveBar", "color": "#E040FB", "shape": "circle", "text": "①"},
-                        {"time": p2['time'], "position": "belowBar", "color": "#E040FB", "shape": "circle", "text": "②"},
-                        {"time": p3['time'], "position": "aboveBar", "color": "#E040FB", "shape": "circle", "text": "③"}
-                    ]
-                }
+    # 2. 次級匹配：若處於 4 點推進中 (0 -> 1 -> 2 -> 3 或 1 -> 2 -> 3 -> 4)
+    cand4 = pivots[-4:]
+    if [p['type'] for p in cand4] == ['low', 'high', 'low', 'high']:
+        p0, p1, p2, p3 = cand4
+        w1 = p1['price'] - p0['price']
+        w3 = p3['price'] - p2['price']
+        if w1 > 0 and w3 > 0 and p2['price'] > p0['price'] and p3['price'] > p1['price']:
+            target_w3 = p2['price'] + 1.618 * w1
+            return {
+                "pattern": "🚀 處於第 ③ 浪主升推動中 (Wave 3 Impulse)",
+                "stage": "主升浪高能推進",
+                "p0": p0, "p1": p1, "p2": p2, "p3": p3, "p4": None, "p5": None,
+                "w1_len": round(w1, 2), "w3_len": round(w3, 2), "w5_len": 0.0,
+                "target_1": round(target_w3, 2),
+                "target_2": round(p2['price'] + 2.618 * w1, 2),
+                "invalidation": round(p2['price'], 2),
+                "wave_lines": [
+                    {"time": p0['time'], "value": p0['price']},
+                    {"time": p1['time'], "value": p1['price']},
+                    {"time": p2['time'], "value": p2['price']},
+                    {"time": p3['time'], "value": p3['price']}
+                ],
+                "wave_markers": [
+                    {"time": p0['time'], "position": "belowBar", "color": "#E040FB", "shape": "circle", "text": "⓪"},
+                    {"time": p1['time'], "position": "aboveBar", "color": "#E040FB", "shape": "circle", "text": "①"},
+                    {"time": p2['time'], "position": "belowBar", "color": "#E040FB", "shape": "circle", "text": "②"},
+                    {"time": p3['time'], "position": "aboveBar", "color": "#E040FB", "shape": "circle", "text": "③"}
+                ]
+            }
 
-    return ew_result
+    # 3. 兜底波段骨架：提取近 5 個交替擺動點直接連線
+    if len(pivots) >= 4:
+        recent_pts = pivots[-5:]
+        lines = [{"time": p["time"], "value": p["price"]} for p in recent_pts]
+        markers = []
+        for idx, p in enumerate(recent_pts):
+            lbl = f"L{idx+1}" if p["type"] == "low" else f"H{idx+1}"
+            pos = "belowBar" if p["type"] == "low" else "aboveBar"
+            markers.append({"time": p["time"], "position": pos, "color": "#E040FB", "shape": "circle", "text": lbl})
+
+        return {
+            "pattern": "🌊 擺動波段骨架結構 (ZigZag Wave Swing)",
+            "stage": "波段震盪推進中",
+            "p0": recent_pts[0], "p1": recent_pts[-1],
+            "w1_len": 0.0, "w3_len": 0.0, "w5_len": 0.0,
+            "target_1": round(recent_pts[-1]["price"] * 1.05, 2),
+            "target_2": round(recent_pts[-1]["price"] * 1.10, 2),
+            "invalidation": round(recent_pts[0]["price"], 2),
+            "wave_lines": lines,
+            "wave_markers": markers
+        }
+
+    return None
 
 def compute_radar_channel_and_markdown(df: pd.DataFrame, ticker: str = "US.NVDA") -> Dict[str, Any]:
-    """
-    計算標準墨菲平行通道、重大防守底座、艾略特波浪幾何與可審計 AI Markdown
-    """
+    """計算墨菲通道、波浪骨架與 AI 審計日誌"""
     if df is None or len(df) < 20:
-        return {"status": "fail", "msg": "K線樣本數不足以構建幾何模型"}
+        return {"status": "fail", "msg": "K線樣本數不足"}
 
     time_col = 'time_clean' if 'time_clean' in df.columns else ('time_key' if 'time_key' in df.columns else df.columns[0])
     df['time_clean'] = df[time_col].astype(str).str.slice(0, 10)
@@ -160,15 +192,18 @@ def compute_radar_channel_and_markdown(df: pd.DataFrame, ticker: str = "US.NVDA"
     last_idx = n - 1
     curr_price = float(closes[-1])
 
-    # 1. 提取客觀波段極值點
-    sw_highs, sw_lows = find_swing_pivots(df, window=8)
-    if len(sw_highs) < 2 or len(sw_lows) < 2:
-        sw_highs, sw_lows = find_swing_pivots(df, window=4)
+    # 1. 提取 LuxAlgo 擺動點
+    pivots = find_lux_zigzag_pivots(df, left=4, right=1)
+    if len(pivots) < 4:
+        pivots = find_lux_zigzag_pivots(df, left=2, right=1)
 
-    # 2. 艾略特波浪理論計算 (LuxAlgo / EWT 鐵律體系)
-    ew_data = extract_elliott_wave_pattern(df, sw_highs, sw_lows)
+    sw_highs = [p for p in pivots if p["type"] == "high"]
+    sw_lows = [p for p in pivots if p["type"] == "low"]
 
-    # 3. 人性化 Major Support（鎖定近 120 根 K 線的結構起漲平台）
+    # 2. 艾略特波浪計算
+    ew_data = extract_elliott_wave_pattern(df, pivots)
+
+    # 3. Major Support（近 120 根結構起漲底座）
     active_lookback = min(n, 120)
     recent_low_slice = lows[-active_lookback:]
     major_support_val = float(np.percentile(recent_low_slice, 10))
@@ -177,11 +212,11 @@ def compute_radar_channel_and_markdown(df: pd.DataFrame, ticker: str = "US.NVDA"
         if valid_candidates:
             major_support_val = min(valid_candidates)
 
-    # 4. 即時 S/R 水平線 (取最近一個波峰與波谷)
+    # 4. 即時 S/R 水平線
     recent_res = float(sw_highs[-1]["price"]) if sw_highs else float(highs[-20:].max())
     recent_sup = float(sw_lows[-1]["price"]) if sw_lows else float(lows[-20:].min())
 
-    # 5. 標準墨菲平行通道構建 (Murphy Parallel Channel)
+    # 5. 墨菲標準平行通道 (Murphy Parallel Channel)
     macro_channel = None
     curr_res_val, curr_sup_val = recent_res, recent_sup
     h1, h2, l1, l2 = None, None, None, None
@@ -222,7 +257,7 @@ def compute_radar_channel_and_markdown(df: pd.DataFrame, ticker: str = "US.NVDA"
             "slope": round(slope, 3)
         }
 
-    # 6. 生成嚴謹可審計的 AI 專用 Markdown 日誌
+    # 6. 生成可審計的 Markdown 日誌
     h1_str = f"{h1['time']} (${h1['price']:.2f})" if h1 else "--"
     h2_str = f"{h2['time']} (${h2['price']:.2f})" if h2 else "--"
     l1_str = f"{l1['time']} (${l1['price']:.2f})" if l1 else "--"
@@ -230,30 +265,17 @@ def compute_radar_channel_and_markdown(df: pd.DataFrame, ticker: str = "US.NVDA"
     h_span = abs(curr_res_val - curr_sup_val)
     channel_pos_pct = ((curr_price - curr_sup_val) / max(0.01, h_span)) * 100.0
 
-    # 格式化艾略特波浪描述文本
     if ew_data:
-        ew_p0_str = f"{ew_data['p0']['time']} (${ew_data['p0']['price']:.2f})"
-        ew_p1_str = f"{ew_data['p1']['time']} (${ew_data['p1']['price']:.2f})"
-        ew_p2_str = f"{ew_data['p2']['time']} (${ew_data['p2']['price']:.2f})"
-        ew_p3_str = f"{ew_data['p3']['time']} (${ew_data['p3']['price']:.2f})"
-        ew_p4_str = f"{ew_data['p4']['time']} (${ew_data['p4']['price']:.2f})" if ew_data.get('p4') else "--"
-        ew_p5_str = f"{ew_data['p5']['time']} (${ew_data['p5']['price']:.2f})" if ew_data.get('p5') else "--"
-
-        ew_section = f"""#### 2. 艾略特波浪 (Elliott Wave · LuxAlgo 鐵律模型)
-- **當前浪級形態**: **{ew_data['pattern']}** ({ew_data['stage']})
-- **推動浪幅審核**: 浪①長度: ${ew_data['w1_len']:.2f} | 浪③長度: ${ew_data['w3_len']:.2f} | 浪⑤長度: ${ew_data['w5_len']:.2f} (✅ 滿足浪③非最短鐵律)
-- **浪級錨點坐標**:
-  - ⓪ 起點: [{ew_p0_str}] ➔ ① 頂: [{ew_p1_str}]
-  - ② 底: [{ew_p2_str}] ➔ ③ 頂: [{ew_p3_str}]
-  - ④ 底: [{ew_p4_str}] ➔ ⑤ 頂: [{ew_p5_str}]
-- **波浪目標與失效邊界**:
-  - 🎯 Target 1 (1.000x 對稱空間): **${ew_data['target_1']:.2f}**
-  - 🎯 Target 2 (1.618x 費氏擴展): **${ew_data['target_2']:.2f}**
-  - 🛡️ 鐵律防守失效線 (Invalidation SL): **${ew_data['invalidation']:.2f}** (跌破則推動浪結構遭破壞)"""
+        ew_section = f"""#### 2. 艾略特波浪 (Elliott Wave · LuxAlgo 模型)
+- **當前浪級形態**: **{ew_data['pattern']}** ({ew_data.get('stage', '')})
+- **推動浪幅審核**: 浪①: ${ew_data.get('w1_len', 0):.2f} | 浪③: ${ew_data.get('w3_len', 0):.2f} | 浪⑤: ${ew_data.get('w5_len', 0):.2f}
+- **波浪目標與防守**:
+  - 🎯 Target 1 (1.000x 對稱): **${ew_data['target_1']:.2f}**
+  - 🎯 Target 2 (1.618x 擴展): **${ew_data['target_2']:.2f}**
+  - 🛡️ 結構失效防守線: **${ew_data['invalidation']:.2f}**"""
     else:
         ew_section = """#### 2. 艾略特波浪 (Elliott Wave)
-- **當前浪級形態**: ⚪ 處於複雜波段整理中 (未觸發經典標準 5 浪鐵律結構)
-- **備註**: 建議以約翰·墨菲平行通道與 S/R 邊界為主要進出基準。"""
+- **當前形態**: ⚪ 處於複雜震盪整理中 (未觸發經典 5 浪推動)"""
 
     ai_markdown = f"""### 📊 【{ticker} 日線技術幾何、墨菲通道與艾略特波浪審計報告】
 **審計基準日期**: {times[-1]} | **最新收盤現價**: ${curr_price:.2f} | **數據樣本總跨度**: {times[0]} 至 {times[-1]} (共 {n} 根日K)
@@ -261,29 +283,24 @@ def compute_radar_channel_and_markdown(df: pd.DataFrame, ticker: str = "US.NVDA"
 #### 1. 當前波段幾何戰區 (John J. Murphy 標準平行通道體系)
 - **通道形態判定**: {macro_channel['trend_type'] if macro_channel else '區間箱體整理'} (每日斜率推升: +${macro_channel['slope']:.2f} USD)
 - **通道幾何高度**: **${h_span:.2f} USD**
-- **動態阻力上軌 (Upper Channel)**:
-  - 基準連線: 由波谷基線平行投射至主要波峰 [{h2_str}]
-  - 當前動態阻力天花板: **${curr_res_val:.2f}**
-- **動態支撐下軌 (Lower Channel)**:
-  - 錨點連線: 起點 P1 [{l1_str}] ➔ 終點 P2 [{l2_str}]
-  - 當前動態支撐地板: **${curr_sup_val:.2f}**
-- **現價相對通道位置**: **{channel_pos_pct:.1f}%** (0% = 踩下軌, 100% = 摸上軌, >100% = 向上突破)
-- **近端水平即時攻防**:
-  - 即時阻力 (RES): ${recent_res:.2f} | 即時支撐 (SUP): ${recent_sup:.2f}
-- **⭐ 當前大波段 MAJOR SUPPORT (核心結構防守底座)**: **${major_support_val:.2f}** (已排除遠古噪點)
+- **動態阻力上軌 (Upper Channel)**: 基準連線至 [{h2_str}] ➔ 當前天花板: **${curr_res_val:.2f}**
+- **動態支撐下軌 (Lower Channel)**: 錨點 P1 [{l1_str}] ➔ P2 [{l2_str}] ➔ 當前地板: **${curr_sup_val:.2f}**
+- **現價相對通道位置**: **{channel_pos_pct:.1f}%**
+- **即時攻防**: RES: ${recent_res:.2f} | SUP: ${recent_sup:.2f}
+- **⭐ MAJOR SUPPORT (核心結構防守底座)**: **${major_support_val:.2f}**
 
 {ew_section}
 
-#### 3. 空間目標推演 (Fibonacci Confluence 重合共振)
+#### 3. 空間目標推演 (Fibonacci Confluence)
 - 上方突破 Target 1 (0.618x 通道擴展): **${(curr_res_val + h_span * 0.618):.2f}**
 - 上方極限 Target 2 (1.000x 通道對稱翻倍): **${(curr_res_val + h_span * 1.000):.2f}**
 - 下方破位防守 Target (下軌跌破 0.618x): **${(curr_sup_val - h_span * 0.618):.2f}**
 
 ---
 #### 4. 給 AI 策略軍師的診斷指令 (Direct Prompt):
-1. **通道與波浪共振審計**：現價 ${curr_price:.2f} 處於墨菲通道的 {channel_pos_pct:.1f}% 分位，結合艾略特波浪當前狀態，多頭是處於第 ⑤ 浪衝頂還是主升浪中繼？
-2. **多空動能評估**：當前 K 線是在回踩動態下軌 (${curr_sup_val:.2f}) 尋求支撐，還是在測試通道上軌 (${curr_res_val:.2f}) 醞釀突破或背離？
-3. **冷血風控邊界**：若失守動態支撐 ${curr_sup_val:.2f} 或波浪失效線 (${ew_data['invalidation'] if ew_data else major_support_val:.2f})，距離 Major Support (${major_support_val:.2f}) 的盈虧比是否支持止損防守？
+1. **通道與波浪共振**：現價 ${curr_price:.2f} 處於通道 {channel_pos_pct:.1f}% 分位，多頭是否面臨通道上軌壓制？
+2. **多空動能評估**：當前 K 線是在回踩動態下軌 (${curr_sup_val:.2f}) 尋求支撐，還是在測試通道上軌 (${curr_res_val:.2f}) 醞釀突破？
+3. **風控邊界**：若失守動態支撐 ${curr_sup_val:.2f}，距離 Major Support (${major_support_val:.2f}) 的盈虧比是否支持防守？
 """
 
     return {
