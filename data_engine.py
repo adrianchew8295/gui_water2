@@ -171,7 +171,6 @@ class MarketDataHub:
             if ret_5m == RET_OK and df_5m_raw is not None and not df_5m_raw.empty:
                 df_5m = clean_kline_df(df_5m_raw)
                 df_5m.to_csv(p_5m, index=False)
-                # 本地 Resample 合成 1H
                 df_1h = resample_5m_to_1h(df_5m)
                 df_1h.to_csv(p_1h, index=False)
 
@@ -208,7 +207,7 @@ class MarketDataHub:
             log_event(f"快照獲取異常: {str(e)}", "ERROR")
         return None
 
-# 全域單例實例 (對接 app.py 與所有插件)
+# 全域單例實例 (精確對接 app.py 及所有插件)
 hub_engine = MarketDataHub()
 data_engine = hub_engine
 
