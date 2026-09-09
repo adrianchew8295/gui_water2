@@ -1,7 +1,7 @@
 # 文件名: data_engine.py
 # 職責: 
 # 1. 導出 hub_engine, get_active_session_info, LOG_PATH, get_moomoo_real_portfolio
-# 2. 鎖定最新 20 天倒序抓取 2026 年最新全時段 5M 原始流
+# 2. 支援 page_req_key 自動分頁穿透，確保 100% 抓取到當日此時此刻最新行情
 # 3. 本地 Pandas 100% 精準 Resample 聚合生成無斷層 1H CSV
 # 4. 提供 auto_heal_today_data 斷點自癒修復管道
 # 5. 倒序抓取真實日線 (DAY) 數據與實盤持倉查詢
@@ -145,7 +145,7 @@ class MarketDataHub:
             json.dump({"assets": assets_list}, f, ensure_ascii=False, indent=2)
 
     def sync_asset_deep_history(self, code: str = "US.QQQ", bars_5m: int = 1500, bars_day: int = 300):
-        """核心同步管道：鎖定最近 20 天，確保拉取 2026 當前最新行情"""
+        """核心同步管道：透過 page_req_key 分頁穿透，一路抓取至今日此時此刻"""
         clean_code = code.replace('.', '_')
         p_5m = os.path.join(DATA_DIR, f"{clean_code}_5M.csv")
         p_1h = os.path.join(DATA_DIR, f"{clean_code}_1H.csv")
@@ -156,40 +156,66 @@ class MarketDataHub:
             quote_ctx = OpenQuoteContext(host='127.0.0.1', port=11111)
             now_ny = datetime.datetime.now(tz_ny)
             end_str = now_ny.strftime("%Y-%m-%d %H:%M:%S")
-            # 鎖定最近 20 天，杜絕被 OpenD 倒退到 2025 年
-            start_str_5m = (now_ny - datetime.timedelta(days=20)).strftime("%Y-%m-%d %H:%M:%S")
-            start_str_day = (now_ny - datetime.timedelta(days=400)).strftime("%Y-%m-%d %H:%M:%S")
+            start_str_5m = (now_ny - datetime.timedelta(days=25)).strftime("%Y-%m-%d %H:%M:%S")
+            start_str_day = (now_ny - datetime.timedelta(days=450)).strftime("%Y-%m-%d %H:%M:%S")
 
-            # 1. 抓取 2026 當前最新 5M 全時段 (含 04:00~20:00)
-            ret_5m, df_5m_raw, _ = quote_ctx.request_history_kline(
-                code=code,
-                start=start_str_5m,
-                end=end_str,
-                ktype=KLType.K_5M,
-                autype=AuType.QFQ,
-                max_count=bars_5m,
-                extended_time=True
-            )
+            # 1. 抓取 5M 全時段 (使用分頁循環直到觸達最新時間 end_str)
+            df_5m_list = []
+            page_key = None
+            while True:
+                ret_5m, df_chunk, page_key = quote_ctx.request_history_kline(
+                    code=code,
+                    start=start_str_5m,
+                    end=end_str,
+                    ktype=KLType.K_5M,
+                    autype=AuType.QFQ,
+                    max_count=1000,
+                    extended_time=True,
+                    page_req_key=page_key
+                )
+                if ret_5m == RET_OK and df_chunk is not None and not df_chunk.empty:
+                    df_5m_list.append(df_chunk)
+                else:
+                    break
+                if page_key is None:
+                    break
+                time.sleep(0.05)
 
-            if ret_5m == RET_OK and df_5m_raw is not None and not df_5m_raw.empty:
-                df_5m = clean_kline_df(df_5m_raw)
+            if df_5m_list:
+                df_5m_all = pd.concat(df_5m_list, ignore_index=True)
+                df_5m = clean_kline_df(df_5m_all)
+                # 保留最新 bars_5m 根
+                df_5m = df_5m.tail(bars_5m).reset_index(drop=True)
                 df_5m.to_csv(p_5m, index=False)
                 df_1h = resample_5m_to_1h(df_5m)
                 df_1h.to_csv(p_1h, index=False)
 
-            # 2. 抓取 2026 當前最新日線
-            ret_day, df_day_raw, _ = quote_ctx.request_history_kline(
-                code=code,
-                start=start_str_day,
-                end=end_str,
-                ktype=KLType.K_DAY,
-                autype=AuType.QFQ,
-                max_count=bars_day
-            )
+            # 2. 抓取日線數據 (帶分頁循環)
+            df_day_list = []
+            page_key_day = None
+            while True:
+                ret_day, df_day_chunk, page_key_day = quote_ctx.request_history_kline(
+                    code=code,
+                    start=start_str_day,
+                    end=end_str,
+                    ktype=KLType.K_DAY,
+                    autype=AuType.QFQ,
+                    max_count=500,
+                    page_req_key=page_key_day
+                )
+                if ret_day == RET_OK and df_day_chunk is not None and not df_day_chunk.empty:
+                    df_day_list.append(df_day_chunk)
+                else:
+                    break
+                if page_key_day is None:
+                    break
+                time.sleep(0.05)
 
-            if ret_day == RET_OK and df_day_raw is not None and not df_day_raw.empty:
-                df_day = clean_kline_df(df_day_raw)
+            if df_day_list:
+                df_day_all = pd.concat(df_day_list, ignore_index=True)
+                df_day = clean_kline_df(df_day_all)
                 df_day['time_clean'] = df_day['time_key'].str.slice(0, 10)
+                df_day = df_day.tail(bars_day).reset_index(drop=True)
                 df_day.to_csv(p_day, index=False)
 
             quote_ctx.close()
@@ -198,7 +224,7 @@ class MarketDataHub:
             return False, str(e)
 
     def auto_heal_today_data(self, code: str = "US.QQQ"):
-        """自動檢查並補齊今日最新 5M 與 1H 數據"""
+        """自動檢查並補齊今日最新數據"""
         try:
             success, msg = self.sync_asset_deep_history(code=code, bars_5m=1500, bars_day=300)
             return success
