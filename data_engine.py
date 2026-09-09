@@ -1,9 +1,11 @@
+@'
 # 文件名: data_engine.py
-# 職責:
-# 1. 導出 app.py 所需的 hub_engine, get_active_session_info, LOG_PATH, get_moomoo_real_portfolio
+# 職責: 
+# 1. 導出 hub_engine, get_active_session_info, LOG_PATH, get_moomoo_real_portfolio
 # 2. 抓取包含美東 04:00~20:00 全時段 5M 原始流
 # 3. 本地 Pandas 100% 精準 Resample 聚合生成無斷層 1H CSV
-# 4. 倒序抓取真實不截斷日線 (DAY) 數據與實盤持倉查詢
+# 4. 提供 auto_heal_today_data 斷點自癒修復管道
+# 5. 倒序抓取真實不截斷日線 (DAY) 數據與實盤持倉查詢
 
 import os
 import time
@@ -21,7 +23,6 @@ WATCHLIST_PATH = os.path.join(BASE_DIR, "watchlist.json")
 LOG_PATH = os.path.join(BASE_DIR, "system_health.log")
 os.makedirs(DATA_DIR, exist_ok=True)
 
-# 系統日誌配置
 logging.basicConfig(
     filename=LOG_PATH,
     level=logging.INFO,
@@ -194,6 +195,15 @@ class MarketDataHub:
         except Exception as e:
             return False, str(e)
 
+    def auto_heal_today_data(self, code: str = "US.QQQ"):
+        """自動檢查並補齊今日最新 5M 與 1H 數據 (對接 chart_view_plugin)"""
+        try:
+            success, msg = self.sync_asset_deep_history(code=code, bars_5m=1500, bars_day=300)
+            return success
+        except Exception as e:
+            log_event(f"auto_heal_today_data 異常: {str(e)}", "ERROR")
+            return False
+
     def get_realtime_snapshot(self, code_list: list):
         ctx = self.get_context()
         if ctx is None: return None
@@ -207,7 +217,6 @@ class MarketDataHub:
             log_event(f"快照獲取異常: {str(e)}", "ERROR")
         return None
 
-# 全域單例實例 (精確導出 hub_engine 與 data_engine 雙名稱)
 hub_engine = MarketDataHub()
 data_engine = hub_engine
 
@@ -252,3 +261,4 @@ def get_moomoo_real_portfolio(host='127.0.0.1', port=11111):
     except Exception as e:
         log_event(f"持倉查詢異常: {str(e)}", "ERROR")
         return None, None, str(e)
+'@ | Set-Content -Path ".\data_engine.py" -Encoding UTF8
