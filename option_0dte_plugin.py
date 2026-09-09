@@ -1,5 +1,5 @@
 # 文件名: option_0dte_plugin.py
-# 职责: QQQ / 美股 0DTE 智能期权实战座舱 (全简体中文 · 左右紧凑双卡片 · 15M ORB + 2B 引擎 · 动态 Greeks · 真实数据复盘)
+# 职责: QQQ / 美股 0DTE 智能期权实战座舱 (左右紧凑双卡片 · 15M ORB + 2B 引擎 · 动态 Greeks · 真实数据复盘 · 专属 AI 数据汇总与优化卡片)
 
 import os
 import json
@@ -346,7 +346,7 @@ def analyze_0dte_tactical(df_5m: pd.DataFrame, df_day: pd.DataFrame, target_code
             "时段 (ET)": time_tag,
             "现价/收盘": f"${float(b['close']):.2f}",
             "方向": "🟢 阳线" if is_green else "🔴 阴线",
-            "影线高低": f"${float(b['high']):.2f} / ${float(b['low']):.2f}",
+            "影线高低": f"${float(b['high']):.2f} /${float(b['low']):.2f}",
             "5M量能比": f"{b_ratio:.2f}x {'🟢' if b_ratio>=1.25 else '⚪'}"
         })
 
@@ -486,7 +486,7 @@ def render_0dte_live_fragment(target_code: str, budget_input: float):
     st.dataframe(df_recent, use_container_width=True, hide_index=True)
 
 def _load_kline_replay_slice(code: str, entry_date_str: str, entry_time_str: str, entry_p: float):
-    """加载真实 5M K线切片 (彻底剔除虚拟梳子假线)"""
+    """加载真实 5M K线切片"""
     clean_code = code.replace('.', '_')
     candidates = [
         os.path.join(DATA_DIR, f"{clean_code}_5M.csv"),
@@ -513,7 +513,6 @@ def _load_kline_replay_slice(code: str, entry_date_str: str, entry_time_str: str
             except Exception:
                 pass
 
-    # 找不到真实数据时，返回空列表，绝不生成梳子假线
     return [], [], [], [], [], [], -1
 
 def render_interactive_replay_chart(trade_row: pd.Series):
@@ -603,12 +602,68 @@ def render_interactive_replay_chart(trade_row: pd.Series):
 
     st.plotly_chart(fig, use_container_width=True, config={'scrollZoom': True, 'displayModeBar': True})
 
+def build_ai_optimization_export(target_code: str, df_journal: pd.DataFrame) -> str:
+    """生成专供 AI 深度审计、复盘归因与策略代码优化的结构化数据包"""
+    now_ny = datetime.datetime.now(tz_ny).strftime('%Y-%m-%d %H:%M:%S ET')
+    now_myt = datetime.datetime.now(tz_my).strftime('%Y-%m-%d %H:%M:%S MYT')
+    
+    total_trades = len(df_journal)
+    wins = len(df_journal[df_journal['net_r'] > 0]) if total_trades > 0 else 0
+    losses = total_trades - wins
+    win_rate = (wins / total_trades) * 100.0 if total_trades > 0 else 0.0
+    total_pnl = float(df_journal['pnl_usd'].sum()) if (total_trades > 0 and 'pnl_usd' in df_journal.columns) else 0.0
+    
+    orb_trades = df_journal[df_journal['strategy'].str.contains('ORB', na=False)] if total_trades > 0 else pd.DataFrame()
+    orb_wins = len(orb_trades[orb_trades['net_r'] > 0]) if not orb_trades.empty else 0
+    orb_wr = (orb_wins / len(orb_trades) * 100.0) if len(orb_trades) > 0 else 0.0
+    
+    reversal_trades = df_journal[df_journal['strategy'].str.contains('2B', na=False)] if total_trades > 0 else pd.DataFrame()
+    rev_wins = len(reversal_trades[reversal_trades['net_r'] > 0]) if not reversal_trades.empty else 0
+    rev_wr = (rev_wins / len(reversal_trades) * 100.0) if len(reversal_trades) > 0 else 0.0
+
+    trade_items_str = ""
+    if total_trades > 0:
+        for idx, r in df_journal.iterrows():
+            trade_items_str += f"""- [订单 {r.get('trade_id')}] 日期: {r.get('date')} | 入场: {r.get('time_myt')} MYT ({r.get('time_et')} ET) ➔ 出场: {r.get('exit_time_et')} ET
+  • 策略/方向: {r.get('strategy')} | {r.get('direction')} | 行权合约: {r.get('opt_symbol', '--')}
+  • 点位参数: Entry: ${float(r.get('entry', 0)):.2f} | SL: ${float(r.get('sl', 0)):.2f} | TP (2R): ${float(r.get('tp', 0)):.2f} | Exit: ${float(r.get('exit_price', 0)):.2f}
+  • 执行结果: {'🟢 WIN (+2.0R / +$400)' if r.get('status')=='WIN_TP' else ('🔴 LOSS (-1.0R / -$200)' if r.get('status')=='LOSS_SL' else '⏳ 运行中')}
+  • 逻辑归因: {r.get('reason', '--')} | 评分细项: {r.get('score_detail', '--')}
+"""
+    else:
+        trade_items_str = "- (当前暂无历史样本数据，系统挂机运行中)"
+
+    prompt_template = f"""```text
+=== 0DTE 量化策略深度审计、归因分析与参数优化指令包 (AI OPTIMIZATION PROMPT) ===
+[1. 审校基准时间与标的]
+• 标的代码: {target_code}
+• 导出时间: {now_myt} (大马/亚洲) | {now_ny} (美东)
+• 数据源状态: 真实 5M 本地数据库落盘 (strategy_live_journal.csv)
+
+[2. 核心量化指标战报 (Macro Stats)]
+• 总样本量: {total_trades} 笔 | 胜率: {win_rate:.1f}% ({wins} 胜 / {losses} 负) | 累计实现盈亏: ${total_pnl:+,.2f} USD
+• 策略分流胜率:
+  ├── 15M ORB 顺势突破: {len(orb_trades)} 笔 | 胜率: {orb_wr:.1f}% ({orb_wins} 胜 / {len(orb_trades)-orb_wins} 负)
+  └── 5M 2B 假突破反转: {len(reversal_trades)} 笔 | 胜率: {rev_wr:.1f}% ({rev_wins} 胜 / {len(reversal_trades)-rev_wins} 负)
+
+[3. 真实样本逐笔执行明细 (Order Trace)]
+{trade_items_str}
+
+[4. 专家审查指令 (AI Auditor Directives)]
+请作为资深 0DTE 量化风控官与策略架构师，根据上述真实交易样本数据，严格按以下 4 项输出诊断与优化方案：
+① 【胜率与盈亏比归因】：分析导致亏损单的核心原因（如：是否在震荡日误触 ORB 突破、VPA 放量门槛 1.5x 是否不足、止损距离 1R 是否过窄导致被扫）。
+② 【策略分流有效性】：对比 15M ORB 顺势突破与 5M 2B 反转策略在当前样本下的表现优劣，指出哪一种更适合当前波动率环境。
+③ 【参数调优建议】：针对入场过滤（VPA 倍数、ORB 突破实体判定）与止损止盈设置（1:2 结构、ATR 缓冲比例），给出具体微调数值。
+④ 【代码补丁方案】：如有必要改进 option_0dte_plugin.py 的策略大脑，直接提供精简修改代码块。
+========================================================================================
+```"""
+    return prompt_template
+
 def render_0dte_journal_tab(target_code: str):
-    """Tab 2：0DTE 专属做功课与记账复盘机 (纯真实数据)"""
+    """Tab 2：0DTE 专属做功课与记账复盘机 (含专属 AI 分析卡片)"""
     df_all = pd.read_csv(JOURNAL_CSV) if os.path.exists(JOURNAL_CSV) else pd.DataFrame()
     df = df_all[df_all['code'] == target_code] if (not df_all.empty and 'code' in df_all.columns) else df_all
 
-    # 动态获取有真实数据的月份
     if not df.empty and 'month' in df.columns:
         existing_m = sorted([str(x) for x in df['month'].dropna().unique()], reverse=True)
         month_list = ["📅 今天 (实盘 Live 信号)"] + existing_m
@@ -666,6 +721,17 @@ def render_0dte_journal_tab(target_code: str):
         render_interactive_replay_chart(selected_row)
     else:
         st.info(f"💡 【{sel_month}】当前暂无信号记录，系统正在以 3 秒频率实时监控中...")
+
+    # =========================================================================
+    # 🌟 底部专属新增卡片：一键导出所有汇总数据 + 专属 AI 分析指令
+    # =========================================================================
+    st.markdown("<div style='height: 14px;'></div>", unsafe_allow_html=True)
+    st.markdown("##### 🤖 [AI 策略军师] 全局数据总结与调优指令卡 (一键复制给 AI 分析)")
+    
+    ai_export_text = build_ai_optimization_export(target_code, df)
+    
+    st.caption("💡 说明：点击右上角复制按钮，直接将下方所有真实历史数据与战报粘贴给 AI，AI 会自动为你深度分析胜率归因并提供代码改良方案：")
+    st.code(ai_export_text, language="markdown")
 
 def render_0dte_cockpit_view(assets=None):
     """0DTE 主入口：双 Tab 结构"""
