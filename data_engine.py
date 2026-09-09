@@ -1,7 +1,6 @@
-@'
 # 文件名: data_engine.py
 # 職責: 
-# 1. 導出 hub_engine, get_active_session_info, LOG_PATH, get_moomoo_real_portfolio
+# 1. 導出 hub_engine, data_engine, get_active_session_info, LOG_PATH, get_moomoo_real_portfolio
 # 2. 抓取包含美東 04:00~20:00 全時段 5M 原始流
 # 3. 本地 Pandas 100% 精準 Resample 聚合生成無斷層 1H CSV
 # 4. 提供 auto_heal_today_data 斷點自癒修復管道
@@ -196,7 +195,7 @@ class MarketDataHub:
             return False, str(e)
 
     def auto_heal_today_data(self, code: str = "US.QQQ"):
-        """自動檢查並補齊今日最新 5M 與 1H 數據 (對接 chart_view_plugin)"""
+        """自動檢查並補齊今日最新 5M 與 1H 數據"""
         try:
             success, msg = self.sync_asset_deep_history(code=code, bars_5m=1500, bars_day=300)
             return success
@@ -217,6 +216,7 @@ class MarketDataHub:
             log_event(f"快照獲取異常: {str(e)}", "ERROR")
         return None
 
+# 全域單例實例導出
 hub_engine = MarketDataHub()
 data_engine = hub_engine
 
@@ -261,4 +261,3 @@ def get_moomoo_real_portfolio(host='127.0.0.1', port=11111):
     except Exception as e:
         log_event(f"持倉查詢異常: {str(e)}", "ERROR")
         return None, None, str(e)
-'@ | Set-Content -Path ".\data_engine.py" -Encoding UTF8
