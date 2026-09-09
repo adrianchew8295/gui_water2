@@ -1,5 +1,5 @@
 # 文件名: option_0dte_plugin.py
-# 職責: QQQ / 美股 0DTE 智能期權實戰座艙 (活水數據自癒 · 3秒無感局部輪詢 · 最新時段強制置頂 · Greeks 儀表盤 · 雙 Tab 結構)
+# 職責: QQQ / 美股 0DTE 智能期權實戰座艙 (內存實時穿透 · 自動長出新Row · 3秒無感刷新 · 最新時段強制置頂)
 
 import os
 import json
@@ -42,22 +42,16 @@ def init_0dte_journal_file():
                 "score_detail": "順應1H均線(+25) + 踩入RBS支撐(+25) + 5M長下影2B破底翻(+25) + VPA 1.85x巨量(+20)",
                 "reason": "回踩今日 PML 地板 + 5M 2B 破底翻長下影陽線 + 1.85x 巨量共振", "pdh": 721.39, "pdl": 715.72,
                 "ema20_1h": 715.80, "rbs": 716.20, "sbr": 719.50, "opt_symbol": "QQQ_260909_719C", "strike_price": 719, "is_golden_window": True
-            },
-            {
-                "trade_id": "#20260908_02", "code": "US.QQQ", "date": "2026-09-08", "time_et": "11:15", "time_myt": "23:15", "exit_time_et": "11:35",
-                "month": "2026-09", "direction": "🔴 PUT", "strategy": "Strategy 1 (2B 假突破)", "entry": 724.80, "sl": 725.90, "tp": 722.60,
-                "exit_price": 725.90, "status": "LOSS_SL", "net_r": -1.0, "pnl_usd": -200.0, "score": 80,
-                "score_detail": "頂部SBR阻力(+25) + 2B衝頂射星(+25) + VPA 1.45x放量(+20) + 逆1H均線(+10)",
-                "reason": "摸頂 SBR 阻力帶做空，後續多頭強勢拉升逆向突破觸發紀律止損", "pdh": 726.00, "pdl": 721.50,
-                "ema20_1h": 722.10, "rbs": 721.80, "sbr": 725.00, "opt_symbol": "QQQ_260908_724P", "strike_price": 724, "is_golden_window": True
             }
         ]
         pd.DataFrame(sample_data).to_csv(JOURNAL_CSV, index=False)
 
 init_0dte_journal_file()
 
-def load_0dte_kline_context(code: str = "US.QQQ"):
-    """加載 5M 與日線數據，具備最新時段主動自癒功能"""
+def load_0dte_kline_live(code: str = "US.QQQ"):
+    """
+    加載 5M 數據並直接注入 OpenD 最新即時跳動棒線 (徹底告別硬碟靜態卡頓)
+    """
     clean_code = code.replace('.', '_')
     p_5m = os.path.join(DATA_DIR, f"{clean_code}_5M.csv")
     p_day = os.path.join(DATA_DIR, f"{clean_code}_DAY.csv")
@@ -65,7 +59,6 @@ def load_0dte_kline_context(code: str = "US.QQQ"):
     df_5m = pd.DataFrame()
     df_day = pd.DataFrame()
 
-    # 自動檢查是否需要補齊數據 (Gap Detector)
     if os.path.exists(p_5m):
         try:
             df = pd.read_csv(p_5m)
@@ -75,16 +68,6 @@ def load_0dte_kline_context(code: str = "US.QQQ"):
             for col in ['open', 'high', 'low', 'close', 'volume']:
                 df[col] = pd.to_numeric(df[col], errors='coerce')
             df_5m = df.dropna().drop_duplicates('dt').sort_values('dt').reset_index(drop=True)
-            
-            # 若最新一根 K 線距離現在超過 5 分鐘，自動在後台進行一次輕量補齊
-            if not df_5m.empty:
-                last_dt = df_5m.iloc[-1]['dt']
-                now_ny = datetime.datetime.now(tz_ny).replace(tzinfo=None)
-                if (now_ny - last_dt).total_seconds() > 300:
-                    try:
-                        hub_engine.auto_heal_today_data(code)
-                    except Exception:
-                        pass
         except Exception:
             pass
 
@@ -97,6 +80,39 @@ def load_0dte_kline_context(code: str = "US.QQQ"):
             df_day = df.dropna().reset_index(drop=True)
         except Exception:
             pass
+
+    # 核心：主動向 OpenD 請求即時快照，動態追加至 df_5m 頂部 (形成實時新 Row)
+    try:
+        snap_df = hub_engine.get_realtime_snapshot([code])
+        if snap_df is not None and not snap_df.empty:
+            row = snap_df.iloc[0]
+            live_price = float(row.get('last_price', row.get('cur_price', 0.0)))
+            if live_price > 0:
+                now_ny = datetime.datetime.now(tz_ny)
+                cur_min = (now_ny.minute // 5) * 5
+                live_5m_dt = now_ny.replace(minute=cur_min, second=0, microsecond=0).replace(tzinfo=None)
+                
+                if not df_5m.empty:
+                    last_row_dt = df_5m.iloc[-1]['dt']
+                    if last_row_dt == live_5m_dt:
+                        # 更新當根走動柱的 High, Low, Close
+                        df_5m.at[df_5m.index[-1], 'close'] = live_price
+                        df_5m.at[df_5m.index[-1], 'high'] = max(df_5m.at[df_5m.index[-1], 'high'], live_price)
+                        df_5m.at[df_5m.index[-1], 'low'] = min(df_5m.at[df_5m.index[-1], 'low'], live_price)
+                    elif live_5m_dt > last_row_dt:
+                        # 換棒瞬間：自動長出全新的一根 K 線！
+                        new_k = {
+                            'dt': live_5m_dt,
+                            'time_key': live_5m_dt.strftime('%Y-%m-%d %H:%M:%S'),
+                            'open': live_price,
+                            'high': live_price,
+                            'low': live_price,
+                            'close': live_price,
+                            'volume': float(row.get('volume', 1000.0))
+                        }
+                        df_5m = pd.concat([df_5m, pd.DataFrame([new_k])], ignore_index=True)
+    except Exception:
+        pass
 
     return df_5m, df_day
 
@@ -158,19 +174,16 @@ def analyze_0dte_tactical(df_5m: pd.DataFrame, df_day: pd.DataFrame, target_code
     curr_time_str = str(curr_bar['dt'])[:16]
     today_date_str = str(curr_bar['dt'])[:10]
 
-    # 1. 換棒倒數
     current_sec = now_ny.minute * 60 + now_ny.second
     sec_to_next_5m = 300 - (current_sec % 300)
     timer_str = f"{sec_to_next_5m // 60:02d}:{sec_to_next_5m % 60:02d}"
 
-    # 2. 昨日極值 (PDH / PDL)
     pdh, pdl = curr_price * 1.008, curr_price * 0.992
     if not df_day.empty and len(df_day) >= 2:
         prev_day = df_day.iloc[-2]
         pdh = float(prev_day['high'])
         pdl = float(prev_day['low'])
 
-    # 3. 今日盤前極值 (PMH / PML)
     df_today = df_5m[df_5m['dt'].dt.strftime('%Y-%m-%d') == today_date_str]
     hours = df_today['dt'].dt.hour
     mins = df_today['dt'].dt.minute
@@ -184,24 +197,20 @@ def analyze_0dte_tactical(df_5m: pd.DataFrame, df_day: pd.DataFrame, target_code
         pmh = curr_price * 1.004
         pml = curr_price * 0.996
 
-    # 4. 近期 SBR / RBS
     recent_slice = df_5m.tail(30)
     sbr = float(recent_slice['high'].max())
     rbs = float(recent_slice['low'].min())
 
-    # 5. 5M 量能比 (VMA20)
     df_5m['vma20'] = df_5m['volume'].rolling(window=20).mean()
     curr_vol = float(curr_bar['volume'])
     vma20_val = float(df_5m['vma20'].iloc[-1]) if pd.notna(df_5m['vma20'].iloc[-1]) and df_5m['vma20'].iloc[-1] > 0 else 1.0
     vol_ratio = curr_vol / vma20_val
 
-    # 6. 差價計算
     target_support = min(pml, rbs)
     target_resistance = max(pmh, sbr)
     dist_to_support = curr_price - target_support
     dist_to_resistance = target_resistance - curr_price
 
-    # 7. 2B 假突破定罪
     is_bull_2b = False
     is_bear_2b = False
     prev_bar = df_5m.iloc[-2]
@@ -273,7 +282,7 @@ def analyze_0dte_tactical(df_5m: pd.DataFrame, df_day: pd.DataFrame, target_code
         opt_sl_price = 0.00
         opt_tp_price = 0.00
 
-    # 8. 過去 6 根 5M 量價流水 (最新時段強制置頂 Top Row)
+    # 過去 6 根 5M 量價流水 (強制置頂第一行)
     recent_6_bars = []
     df_slice_desc = df_5m.tail(6).iloc[::-1].reset_index(drop=True)
     for idx, b in df_slice_desc.iterrows():
@@ -358,8 +367,8 @@ def analyze_0dte_tactical(df_5m: pd.DataFrame, df_day: pd.DataFrame, target_code
 
 @st.fragment(run_every=3.0)
 def render_0dte_live_fragment(target_code: str, budget_input: float):
-    """Tab 1：0DTE 即時射控艙 (局部無感平滑刷新)"""
-    df_5m, df_day = load_0dte_kline_context(target_code)
+    """Tab 1：0DTE 即時射控艙 (3秒內存無感平滑刷新)"""
+    df_5m, df_day = load_0dte_kline_live(target_code)
     if df_5m.empty:
         st.warning(f"⚠️ {target_code} 暫無 5M 本地數據，請在終端執行 `python sync_history.py`。")
         return
@@ -376,7 +385,7 @@ def render_0dte_live_fragment(target_code: str, budget_input: float):
         f"""
         <div style="background-color: #0d1117; border: 1px solid #30363d; border-radius: 8px; padding: 10px 16px; margin-bottom: 12px; font-family: monospace;">
             <div style="font-size: 14px; font-weight: bold; color: #58a6ff; display: flex; justify-content: space-between; align-items: center;">
-                <span>⚡ {target_code} · 0DTE 日內期權戰術射控艙 <span style="font-size: 11px; color: #00e676;">● 實時輪詢中 ({now_clock} MYT)</span></span>
+                <span>⚡ {target_code} · 0DTE 日內期權戰術射控艙 <span style="font-size: 11px; color: #00e676;">● 實時自動推進中 ({now_clock} MYT)</span></span>
                 <span style="font-size: 13px; color: #ffd600;">⏱️ 距離下根 5M 定格換棒: <b>{data['timer_str']}</b></span>
             </div>
             <div style="margin-top: 6px; display: flex; flex-wrap: wrap; gap: 20px; font-size: 13px; color: #c9d1d9;">
@@ -390,7 +399,7 @@ def render_0dte_live_fragment(target_code: str, budget_input: float):
         unsafe_allow_html=True
     )
 
-    # 核心指令卡 (待機雷達防呆)
+    # 核心指令卡
     if data['is_armed']:
         strike_html = f"<div style='font-size: 26px; font-weight: bold; color: #ffd600;'>${data['strike_price']} {data['opt_type']}</div>"
         code_html = f"<div style='font-size: 16px; font-weight: bold; color: #58a6ff;'>{data['opt_symbol']}</div>"
@@ -431,7 +440,7 @@ def render_0dte_live_fragment(target_code: str, budget_input: float):
         unsafe_allow_html=True
     )
 
-    # 0DTE 期權 Greeks 儀表盤
+    # Greeks 儀表盤
     delta_color = "#ffd600" if data['is_armed'] else "#8b949e"
     st.markdown(
         f"""
@@ -448,8 +457,8 @@ def render_0dte_live_fragment(target_code: str, budget_input: float):
         unsafe_allow_html=True
     )
 
-    # 5M 歷史柱滾動流水（強制最新置頂 Top Row）
-    st.markdown("##### 📊 5M 即時量價核心表 (最新時段強制置頂 · 過去 30 分鐘黃金窗口)")
+    # 5M 歷史柱滾動流水 (置頂第一行)
+    st.markdown("##### 📊 5M 即時量價核心表 (最新時段強制置頂 · 每 3 秒動態生長)")
     df_recent = pd.DataFrame(data['recent_6_bars'])
     st.dataframe(df_recent, use_container_width=True, hide_index=True)
 
