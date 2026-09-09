@@ -1,5 +1,5 @@
 # 文件名: option_0dte_plugin.py
-# 職責: QQQ / 美股 0DTE 智能期權實戰座艙 (內存實時穿透 · 自動長出新Row · 3秒無感刷新 · 最新時段強制置頂)
+# 職責: QQQ / 美股 0DTE 智能期權實戰座艙 (實時動態 Greeks 呼吸計算 · 內存實時穿透 · 空間差價即時追蹤 · 雙 Tab 結構)
 
 import os
 import json
@@ -49,9 +49,7 @@ def init_0dte_journal_file():
 init_0dte_journal_file()
 
 def load_0dte_kline_live(code: str = "US.QQQ"):
-    """
-    加載 5M 數據並直接注入 OpenD 最新即時跳動棒線 (徹底告別硬碟靜態卡頓)
-    """
+    """加載 5M 數據並注入 OpenD 最新即時跳動點位"""
     clean_code = code.replace('.', '_')
     p_5m = os.path.join(DATA_DIR, f"{clean_code}_5M.csv")
     p_day = os.path.join(DATA_DIR, f"{clean_code}_DAY.csv")
@@ -81,7 +79,7 @@ def load_0dte_kline_live(code: str = "US.QQQ"):
         except Exception:
             pass
 
-    # 核心：主動向 OpenD 請求即時快照，動態追加至 df_5m 頂部 (形成實時新 Row)
+    # 即時快照注入
     try:
         snap_df = hub_engine.get_realtime_snapshot([code])
         if snap_df is not None and not snap_df.empty:
@@ -95,12 +93,10 @@ def load_0dte_kline_live(code: str = "US.QQQ"):
                 if not df_5m.empty:
                     last_row_dt = df_5m.iloc[-1]['dt']
                     if last_row_dt == live_5m_dt:
-                        # 更新當根走動柱的 High, Low, Close
                         df_5m.at[df_5m.index[-1], 'close'] = live_price
                         df_5m.at[df_5m.index[-1], 'high'] = max(df_5m.at[df_5m.index[-1], 'high'], live_price)
                         df_5m.at[df_5m.index[-1], 'low'] = min(df_5m.at[df_5m.index[-1], 'low'], live_price)
                     elif live_5m_dt > last_row_dt:
-                        # 換棒瞬間：自動長出全新的一根 K 線！
                         new_k = {
                             'dt': live_5m_dt,
                             'time_key': live_5m_dt.strftime('%Y-%m-%d %H:%M:%S'),
@@ -116,55 +112,8 @@ def load_0dte_kline_live(code: str = "US.QQQ"):
 
     return df_5m, df_day
 
-def auto_log_0dte_signal(target_code: str, curr_time_str: str, curr_price: float, sl_price: float, tp_price: float, opt_symbol: str, strike_price: int, opt_type: str, vol_ratio: float, reason: str):
-    """自動記錄訊號至 CSV"""
-    try:
-        df_j = pd.read_csv(JOURNAL_CSV) if os.path.exists(JOURNAL_CSV) else pd.DataFrame()
-        date_str = curr_time_str[:10]
-        time_et_str = curr_time_str[11:16]
-        
-        if not df_j.empty and 'time_et' in df_j.columns and 'date' in df_j.columns and 'code' in df_j.columns:
-            exists = df_j[(df_j['code'] == target_code) & (df_j['date'] == date_str) & (df_j['time_et'] == time_et_str)]
-            if not exists.empty:
-                return
-
-        trade_id = f"#{date_str.replace('-', '')}_{len(df_j) + 1:02d}"
-        new_entry = {
-            "trade_id": trade_id,
-            "code": target_code,
-            "date": date_str,
-            "time_et": time_et_str,
-            "time_myt": (datetime.datetime.strptime(curr_time_str, "%Y-%m-%d %H:%M") + datetime.timedelta(hours=12)).strftime("%H:%M"),
-            "exit_time_et": "--",
-            "month": date_str[:7],
-            "direction": f"🟢 {opt_type}" if opt_type == "CALL" else f"🔴 {opt_type}",
-            "strategy": "0DTE 2B 量化扳機",
-            "entry": curr_price,
-            "sl": sl_price,
-            "tp": tp_price,
-            "exit_price": 0.0,
-            "status": "RUNNING",
-            "net_r": 0.0,
-            "pnl_usd": 0.0,
-            "score": 85,
-            "score_detail": f"空間邊界到位(+25) + 5M 2B 形態反轉(+25) + VPA {vol_ratio:.2f}x 放量(+25) + 0DTE ATM(+10)",
-            "reason": reason,
-            "pdh": curr_price * 1.008,
-            "pdl": curr_price * 0.992,
-            "ema20_1h": curr_price * 0.998,
-            "rbs": curr_price * 0.995,
-            "sbr": curr_price * 1.005,
-            "opt_symbol": opt_symbol,
-            "strike_price": strike_price,
-            "is_golden_window": True
-        }
-        df_new = pd.concat([df_j, pd.DataFrame([new_entry])], ignore_index=True)
-        df_new.to_csv(JOURNAL_CSV, index=False)
-    except Exception:
-        pass
-
 def analyze_0dte_tactical(df_5m: pd.DataFrame, df_day: pd.DataFrame, target_code: str = "US.QQQ", budget_usd: float = 200.0):
-    """0DTE 量化定罪大腦"""
+    """0DTE 量化定罪大腦：實時動態 Greeks 計算"""
     if df_5m.empty or len(df_5m) < 15:
         return {"status": "fail", "msg": "5M 數據樣本不足"}
 
@@ -174,16 +123,19 @@ def analyze_0dte_tactical(df_5m: pd.DataFrame, df_day: pd.DataFrame, target_code
     curr_time_str = str(curr_bar['dt'])[:16]
     today_date_str = str(curr_bar['dt'])[:10]
 
+    # 1. 換棒倒數
     current_sec = now_ny.minute * 60 + now_ny.second
     sec_to_next_5m = 300 - (current_sec % 300)
     timer_str = f"{sec_to_next_5m // 60:02d}:{sec_to_next_5m % 60:02d}"
 
+    # 2. 昨日極值 (PDH / PDL - 全天固定標尺)
     pdh, pdl = curr_price * 1.008, curr_price * 0.992
     if not df_day.empty and len(df_day) >= 2:
         prev_day = df_day.iloc[-2]
         pdh = float(prev_day['high'])
         pdl = float(prev_day['low'])
 
+    # 3. 今日盤前極值 (PMH / PML - 盤後固定標尺)
     df_today = df_5m[df_5m['dt'].dt.strftime('%Y-%m-%d') == today_date_str]
     hours = df_today['dt'].dt.hour
     mins = df_today['dt'].dt.minute
@@ -197,20 +149,24 @@ def analyze_0dte_tactical(df_5m: pd.DataFrame, df_day: pd.DataFrame, target_code
         pmh = curr_price * 1.004
         pml = curr_price * 0.996
 
+    # 4. 近期 SBR / RBS (30 根動態區間)
     recent_slice = df_5m.tail(30)
     sbr = float(recent_slice['high'].max())
     rbs = float(recent_slice['low'].min())
 
+    # 5. 5M 量能比 (VMA20)
     df_5m['vma20'] = df_5m['volume'].rolling(window=20).mean()
     curr_vol = float(curr_bar['volume'])
     vma20_val = float(df_5m['vma20'].iloc[-1]) if pd.notna(df_5m['vma20'].iloc[-1]) and df_5m['vma20'].iloc[-1] > 0 else 1.0
     vol_ratio = curr_vol / vma20_val
 
+    # 6. 動態差價 (每秒實時跳動)
     target_support = min(pml, rbs)
     target_resistance = max(pmh, sbr)
     dist_to_support = curr_price - target_support
     dist_to_resistance = target_resistance - curr_price
 
+    # 7. 2B 形態判定
     is_bull_2b = False
     is_bear_2b = False
     prev_bar = df_5m.iloc[-2]
@@ -221,6 +177,19 @@ def analyze_0dte_tactical(df_5m: pd.DataFrame, df_day: pd.DataFrame, target_code
         is_bear_2b = True
 
     risk_unit = max(0.60, abs(curr_bar['high'] - curr_bar['low']))
+
+    # 8. 動態 Greeks 實時計算模型 (現價每跳動 1 分錢，Greeks 即時呼吸)
+    nearest_atm_strike = int(round(curr_price))
+    moneyness = curr_price - nearest_atm_strike # 現價相對於平值的偏離
+    live_delta = round(0.50 + moneyness * 0.12, 2) # 隨現價微幅動態浮動
+    live_delta = max(0.20, min(0.80, live_delta))
+    
+    # 剩餘小時數計算 Theta 加速度
+    cur_hour = now_ny.hour + now_ny.minute / 60.0
+    hours_left = max(0.5, 16.0 - cur_hour) if cur_hour <= 16.0 else 0.5
+    live_theta = round(-0.45 * (6.5 / hours_left)**0.5, 2) # 越接近尾盤衰減越快
+    live_gamma = round(0.08 + (6.5 / hours_left) * 0.01, 2)
+    live_iv = round(17.5 + abs(moneyness) * 0.8, 1)
 
     if is_bull_2b and vol_ratio >= 1.25:
         action_type = "BUY_CALL"
@@ -233,7 +202,6 @@ def analyze_0dte_tactical(df_5m: pd.DataFrame, df_day: pd.DataFrame, target_code
         sl_price = curr_price - risk_unit
         tp_price = curr_price + 2.0 * risk_unit
         is_armed = True
-        auto_log_0dte_signal(target_code, curr_time_str, curr_price, sl_price, tp_price, f"{target_code.replace('US.', '')}_{now_ny.strftime('%y%m%d')}_{strike_price}C", strike_price, "CALL", vol_ratio, "5M 踩入 PML/RBS 地板 + 2B 放量破底翻")
     elif is_bear_2b and vol_ratio >= 1.25:
         action_type = "BUY_PUT"
         action_banner = f"⚡ 觸發空頭 2B 衝頂假突破 (VPA {vol_ratio:.2f}x) ➔ 立即買入 0DTE ATM PUT"
@@ -245,7 +213,6 @@ def analyze_0dte_tactical(df_5m: pd.DataFrame, df_day: pd.DataFrame, target_code
         sl_price = curr_price + risk_unit
         tp_price = curr_price - 2.0 * risk_unit
         is_armed = True
-        auto_log_0dte_signal(target_code, curr_time_str, curr_price, sl_price, tp_price, f"{target_code.replace('US.', '')}_{now_ny.strftime('%y%m%d')}_{strike_price}P", strike_price, "PUT", vol_ratio, "5M 衝頂 PMH/SBR 阻力 + 2B 放量假突破回落")
     else:
         action_type = "WAIT"
         action_banner = f"☕ 安全中繼待機區 (距地板支撐 -${dist_to_support:.2f} | 距天花板阻力 +${dist_to_resistance:.2f} · 嚴禁追單)"
@@ -253,36 +220,20 @@ def analyze_0dte_tactical(df_5m: pd.DataFrame, df_day: pd.DataFrame, target_code
         action_bg = "rgba(139, 148, 158, 0.08)"
         action_border = "#30363d"
         opt_type = "NONE"
-        strike_price = None
+        strike_price = nearest_atm_strike
         sl_price = 0.0
         tp_price = 0.0
         is_armed = False
 
-    if is_armed:
-        delta_val = 0.52 if opt_type == "CALL" else -0.48
-        theta_val = -0.42
-        gamma_val = 0.09
-        iv_val = 18.2
-        est_opt_premium = max(1.10, round(abs(curr_price - strike_price) + 1.45, 2))
-        contract_cost = est_opt_premium * 100.0
-        max_contracts = max(1, int(budget_usd // contract_cost))
-        total_budget_used = max_contracts * contract_cost
-        opt_symbol = f"{target_code.replace('US.', '')}_{now_ny.strftime('%y%m%d')}_{strike_price}{opt_type[0]}"
-        opt_sl_price = round(est_opt_premium * 0.65, 2)
-        opt_tp_price = round(est_opt_premium * 1.70, 2)
-    else:
-        delta_val = 0.00
-        theta_val = -0.42
-        gamma_val = 0.00
-        iv_val = 18.0
-        est_opt_premium = 0.00
-        max_contracts = 0
-        total_budget_used = 0.00
-        opt_symbol = "────────"
-        opt_sl_price = 0.00
-        opt_tp_price = 0.00
+    est_opt_premium = max(1.10, round(abs(curr_price - strike_price) + 1.45, 2))
+    contract_cost = est_opt_premium * 100.0
+    max_contracts = max(1, int(budget_usd // contract_cost))
+    total_budget_used = max_contracts * contract_cost
+    opt_symbol = f"{target_code.replace('US.', '')}_{now_ny.strftime('%y%m%d')}_{strike_price}{'C' if opt_type=='CALL' else ('P' if opt_type=='PUT' else 'ATM')}"
+    opt_sl_price = round(est_opt_premium * 0.65, 2)
+    opt_tp_price = round(est_opt_premium * 1.70, 2)
 
-    # 過去 6 根 5M 量價流水 (強制置頂第一行)
+    # 過去 6 根 5M 量價流水 (置頂第一行)
     recent_6_bars = []
     df_slice_desc = df_5m.tail(6).iloc[::-1].reset_index(drop=True)
     for idx, b in df_slice_desc.iterrows():
@@ -300,35 +251,6 @@ def analyze_0dte_tactical(df_5m: pd.DataFrame, df_day: pd.DataFrame, target_code
             "影線高低": f"${float(b['high']):.2f} / ${float(b['low']):.2f}",
             "5M量能比": f"{b_ratio:.2f}x {'🟢' if b_ratio>=1.25 else '⚪'}"
         })
-
-    if is_armed:
-        trade_plan_md = f"""#### 2. 0DTE 戰術指令與期權 Greeks 推薦
-- **當前射控狀態**: **{action_banner}**
-- **🎯 鎖定行權價 (Strike)**: **${strike_price} {opt_type}** | 合約代號: `{opt_symbol}`
-- **期權 Greeks**: Delta: **{delta_val:+.2f}** | Theta: **{theta_val:.2f}/天** | Gamma: **{gamma_val:.2f}** | IV: **{iv_val:.1f}%**
-- **頭寸管理**: 單張估價 **${est_opt_premium:.2f}** ➔ 建議開倉 **{max_contracts}** 張 | 總動用資金: **${total_budget_used:.2f} USD**
-
-#### 3. 1:2 結構止損止盈執行清單
-- **正股錨定點位**: 入場: ${curr_price:.2f} | 止損: ${sl_price:.2f} | 2R止盈: ${tp_price:.2f}
-- **0DTE 期權執行**:
-  - 🛡️ 期權止損線 (-35% SL): **${opt_sl_price:.2f}**
-  - 🎯 期權止盈線 (+70% TP): **${opt_tp_price:.2f}** (嚴格鎖定 1:2 盈虧比)"""
-    else:
-        trade_plan_md = f"""#### 2. 0DTE 待機雷達狀態
-- **當前射控狀態**: **⚪ 處於安全中繼待機區 (距地板支撐 -${dist_to_support:.2f} | 距天花板阻力 +${dist_to_resistance:.2f})**
-- **戰術提示**: 正股尚未觸及關鍵空間邊界，量能未達 1.25x 門禁，系統強制鎖死開火權限，嚴格防範 Theta 磨損。"""
-
-    ai_audit_md = f"""### ⚡ 【{target_code} 0DTE 日內期權戰術射控與風控日誌】
-**審計基準時戳**: {curr_time_str} ET | **正股現價**: ${curr_price:.2f} | **單筆預算上限**: ${budget_usd:.2f} USD
-
-#### 1. 當前空間戰區與極值邊界
-- **昨日極值 (Prior Day)**: PDH (天花板): ${pdh:.2f} | PDL (地板): ${pdl:.2f}
-- **今日盤前極值 (Pre-Market)**: PMH: ${pmh:.2f} | PML: ${pml:.2f}
-- **近期攻防帶 (SBR/RBS)**: SBR: ${sbr:.2f} | RBS: ${rbs:.2f}
-- **5M 即時量能比 (VPA Ratio)**: **{vol_ratio:.2f}x** (門禁 ≥ 1.25x)
-
-{trade_plan_md}
-"""
 
     return {
         "status": "success",
@@ -350,10 +272,10 @@ def analyze_0dte_tactical(df_5m: pd.DataFrame, df_day: pd.DataFrame, target_code
         "opt_symbol": opt_symbol,
         "strike_price": strike_price,
         "opt_type": opt_type,
-        "delta_val": delta_val,
-        "theta_val": theta_val,
-        "gamma_val": gamma_val,
-        "iv_val": iv_val,
+        "delta_val": live_delta,
+        "theta_val": live_theta,
+        "gamma_val": live_gamma,
+        "iv_val": live_iv,
         "est_opt_premium": est_opt_premium,
         "max_contracts": max_contracts,
         "total_budget_used": total_budget_used,
@@ -361,8 +283,7 @@ def analyze_0dte_tactical(df_5m: pd.DataFrame, df_day: pd.DataFrame, target_code
         "tp_price": tp_price,
         "opt_sl_price": opt_sl_price,
         "opt_tp_price": opt_tp_price,
-        "recent_6_bars": recent_6_bars,
-        "ai_audit_md": ai_audit_md
+        "recent_6_bars": recent_6_bars
     }
 
 @st.fragment(run_every=3.0)
@@ -380,33 +301,33 @@ def render_0dte_live_fragment(target_code: str, budget_input: float):
 
     now_clock = datetime.datetime.now(tz_my).strftime('%H:%M:%S')
 
-    # 頂部狀態列
+    # 1. 頂部狀態列 (附帶秒級心跳標記)
     st.markdown(
         f"""
         <div style="background-color: #0d1117; border: 1px solid #30363d; border-radius: 8px; padding: 10px 16px; margin-bottom: 12px; font-family: monospace;">
             <div style="font-size: 14px; font-weight: bold; color: #58a6ff; display: flex; justify-content: space-between; align-items: center;">
-                <span>⚡ {target_code} · 0DTE 日內期權戰術射控艙 <span style="font-size: 11px; color: #00e676;">● 實時自動推進中 ({now_clock} MYT)</span></span>
+                <span>⚡ {target_code} · 0DTE 日內期權戰術射控艙 <span style="font-size: 11px; color: #00e676;">● 實時輪詢中 ({now_clock} MYT)</span></span>
                 <span style="font-size: 13px; color: #ffd600;">⏱️ 距離下根 5M 定格換棒: <b>{data['timer_str']}</b></span>
             </div>
             <div style="margin-top: 6px; display: flex; flex-wrap: wrap; gap: 20px; font-size: 13px; color: #c9d1d9;">
                 <span>正股現價: <b style="color: #79c0ff; font-size: 15px;">${data['curr_price']:.2f}</b></span>
                 <span>5M量能比: <b style="color: {'#00e676' if data['vol_ratio']>=1.25 else '#8b949e'};">{data['vol_ratio']:.2f}x</b></span>
-                <span>PDH/PDL: <b style="color: #ffd600;">${data['pdh']:.2f} / ${data['pdl']:.2f}</b></span>
-                <span>PMH/PML: <b style="color: #56d364;">${data['pmh']:.2f} / ${data['pml']:.2f}</b></span>
+                <span>PDH/PDL (昨日標尺): <b style="color: #ffd600;">${data['pdh']:.2f} / ${data['pdl']:.2f}</b></span>
+                <span>PMH/PML (盤前標尺): <b style="color: #56d364;">${data['pmh']:.2f} / ${data['pml']:.2f}</b></span>
             </div>
         </div>
         """,
         unsafe_allow_html=True
     )
 
-    # 核心指令卡
+    # 2. 核心指令卡 (動態差價即時反映)
     if data['is_armed']:
         strike_html = f"<div style='font-size: 26px; font-weight: bold; color: #ffd600;'>${data['strike_price']} {data['opt_type']}</div>"
         code_html = f"<div style='font-size: 16px; font-weight: bold; color: #58a6ff;'>{data['opt_symbol']}</div>"
         cost_html = f"<div style='font-size: 15px; color: #c9d1d9;'><b>${data['est_opt_premium']:.2f}</b> ➔ <b style='color:#00e5ff;'>{data['max_contracts']} 張</b> (${data['total_budget_used']:.2f})</div>"
         sltp_html = f"<div style='font-size: 15px;'><b style='color:#ff7b72;'>${data['opt_sl_price']:.2f}</b> / <b style='color:#56d364;'>${data['opt_tp_price']:.2f}</b></div>"
     else:
-        strike_html = "<div style='font-size: 18px; font-weight: bold; color: #8b949e;'>🔒 鎖定待機 (無信號)</div>"
+        strike_html = f"<div style='font-size: 18px; font-weight: bold; color: #8b949e;'>🔒 鎖定待機 (ATM: ${data['strike_price']})</div>"
         code_html = "<div style='font-size: 15px; color: #8b949e;'>────────</div>"
         cost_html = f"<div style='font-size: 13px; color: #8b949e;'>距地板支撐: <b style='color:#56d364;'>-${data['dist_to_support']:.2f}</b></div>"
         sltp_html = f"<div style='font-size: 13px; color: #8b949e;'>距天花板阻力: <b style='color:#ff7b72;'>+${data['dist_to_resistance']:.2f}</b></div>"
@@ -427,11 +348,11 @@ def render_0dte_live_fragment(target_code: str, budget_input: float):
                     {code_html}
                 </div>
                 <div>
-                    <div style="font-size: 11px; color: #8b949e;">💵 估計單價 / 張數</div>
+                    <div style="font-size: 11px; color: #8b949e;">💵 空間測算 / 差價</div>
                     {cost_html}
                 </div>
                 <div>
-                    <div style="font-size: 11px; color: #8b949e;">🛡️ 止損 (-35%) / 🎯 止盈 (+70%)</div>
+                    <div style="font-size: 11px; color: #8b949e;">🛡️ 邊界防禦點位</div>
                     {sltp_html}
                 </div>
             </div>
@@ -440,32 +361,27 @@ def render_0dte_live_fragment(target_code: str, budget_input: float):
         unsafe_allow_html=True
     )
 
-    # Greeks 儀表盤
-    delta_color = "#ffd600" if data['is_armed'] else "#8b949e"
+    # 3. Greeks 儀表盤 (隨正股現價即時動態呼吸)
     st.markdown(
         f"""
         <div style="background-color: #161b22; border: 1px solid #30363d; border-radius: 6px; padding: 10px 16px; margin-bottom: 14px; font-family: monospace;">
-            <div style="font-size: 13px; font-weight: bold; color: #58a6ff; margin-bottom: 6px;">📊 0DTE Greeks 希臘字母即時估算儀表盤</div>
+            <div style="font-size: 13px; font-weight: bold; color: #58a6ff; margin-bottom: 6px;">📊 0DTE Greeks 希臘字母即時估算儀表盤 (每 3 秒動態重估)</div>
             <div style="display: flex; flex-wrap: wrap; gap: 24px; font-size: 13px; color: #c9d1d9;">
-                <span>Delta (Δ): <b style="color: {delta_color};">{data['delta_val']:+.2f}</b> {'(平值 ATM)' if data['is_armed'] else '(待機中)'}</span>
-                <span>Theta (Θ): <b style="color: #ff7b72;">{data['theta_val']:.2f} USD/天</b> (時間衰減)</span>
+                <span>Delta (Δ): <b style="color: #ffd600;">{data['delta_val']:+.2f}</b> (動態平值 ATM)</span>
+                <span>Theta (Θ): <b style="color: #ff7b72;">{data['theta_val']:.2f} USD/天</b> (盤中加速衰減)</span>
                 <span>Gamma (Γ): <b style="color: #56d364;">{data['gamma_val']:.2f}</b> (加速度)</span>
                 <span>隱含波動率 (IV): <b style="color: #e040fb;">{data['iv_val']:.1f}%</b></span>
+                <span>ATM 估計單價: <b style="color: #00e5ff;">${data['est_opt_premium']:.2f}</b></span>
             </div>
         </div>
         """,
         unsafe_allow_html=True
     )
 
-    # 5M 歷史柱滾動流水 (置頂第一行)
+    # 4. 5M 歷史柱滾動流水
     st.markdown("##### 📊 5M 即時量價核心表 (最新時段強制置頂 · 每 3 秒動態生長)")
     df_recent = pd.DataFrame(data['recent_6_bars'])
     st.dataframe(df_recent, use_container_width=True, hide_index=True)
-
-    # AI Markdown 審計日誌
-    with st.expander("📋 [AI 策略軍師] 0DTE 專用診斷 Markdown 日誌 (可一鍵複製)", expanded=False):
-        st.caption("點擊右上角按鈕即可直接複製完整 0DTE 數據與風控計劃：")
-        st.code(data["ai_audit_md"], language="markdown")
 
 def _load_kline_replay_slice(code: str, entry_date_str: str, entry_time_str: str, entry_p: float):
     """加載做功課指定時段前後 30 分鐘真實 5M K 線切片"""
@@ -585,14 +501,6 @@ def render_interactive_replay_chart(trade_row: pd.Series):
 
 def render_0dte_journal_tab(target_code: str):
     """Tab 2：0DTE 專屬做功課與記帳復盤機"""
-    st.markdown("""
-    <style>
-    .metric-banner { background: #0d1117; border: 1px solid #21262d; border-radius: 6px; padding: 10px 16px; margin-bottom: 12px; font-family: monospace; }
-    .win-tag { color: #00E676; font-weight: bold; background: rgba(0, 230, 118, 0.12); padding: 2px 6px; border-radius: 4px; }
-    .loss-tag { color: #FF5252; font-weight: bold; background: rgba(255, 82, 82, 0.12); padding: 2px 6px; border-radius: 4px; }
-    </style>
-    """, unsafe_allow_html=True)
-
     df_all = pd.read_csv(JOURNAL_CSV) if os.path.exists(JOURNAL_CSV) else pd.DataFrame()
     df = df_all[df_all['code'] == target_code] if (not df_all.empty and 'code' in df_all.columns) else df_all
 
@@ -624,7 +532,7 @@ def render_0dte_journal_tab(target_code: str):
         pnl_color = "#00E676" if total_pnl >= 0 else "#FF5252"
         verdict = "🟢 WORKABLE (推薦實盤)" if win_rate >= 50 else ("⚪ 樣本累積中" if total == 0 else "🔴 需優化")
         st.markdown(f"""
-        <div class="metric-banner">
+        <div style="background: #0d1117; border: 1px solid #21262d; border-radius: 6px; padding: 10px 16px; margin-bottom: 12px; font-family: monospace;">
             <div style="display: flex; justify-content: space-between; align-items: center;">
                 <span style="font-size: 13px; font-weight: bold; color: {'#00E676' if win_rate>=50 else '#ffd700'};">🏆 {verdict}</span>
                 <span style="font-size: 12px; color: #8b949e;">勝率: <b style="color:#ffd700;">{win_rate:.1f}%</b> ({wins}勝/{losses}負) | 累計做功課損益: <b style="color:{pnl_color};">${total_pnl:+,.2f} USD</b></span>
@@ -632,7 +540,6 @@ def render_0dte_journal_tab(target_code: str):
         </div>
         """, unsafe_allow_html=True)
 
-    selected_row = None
     if not df_filtered.empty:
         dates_available = sorted(list(df_filtered['date'].dropna().unique()), reverse=True)
         col_d1, col_d2 = st.columns([2, 3])
@@ -650,46 +557,10 @@ def render_0dte_journal_tab(target_code: str):
             sel_sig_idx = st.selectbox("🎯 選擇訊號展開做功課 (贏綠輸紅):", range(len(options)), format_func=lambda x: options[x])
 
         selected_row = df_day.iloc[sel_sig_idx]
-
         st.caption(f"🔍 5M 技術復盤視圖 (標的: {target_code} · 支援滾輪縮放/左右拖拽/標籤避讓)：")
         render_interactive_replay_chart(selected_row)
-
-        is_win_sel = selected_row.get('status') == 'WIN_TP'
-        badge_html = '<span class="win-tag">🟢 WIN 止盈 (+2.0R / +$400 USD)</span>' if is_win_sel else ('<span class="loss-tag">🔴 LOSS 止損 (-1.0R / -$200 USD)</span>' if selected_row.get('status') == 'LOSS_SL' else '<span style="color:#00e5ff;">⏳ 訂單運行中</span>')
-        score_num = selected_row.get('score', 0)
-
-        st.markdown(f"""
-        <div style="background: #161b22; border-left: 4px solid {'#00E676' if is_win_sel else '#FF5252'}; padding: 10px 14px; border-radius: 4px; font-size: 13px; font-family: monospace; color: #c9d1d9; margin-bottom: 10px;">
-            <div style="margin-bottom: 6px;">{badge_html} | 訂單編號: <b>{selected_row.get('trade_id')}</b> | 推薦期權: <b style="color:#ffd600;">{selected_row.get('opt_symbol', '--')}</b> | 客觀評分: <b style="color:#00e676;">{score_num} 分</b></div>
-            <div style="color: #8b949e; margin-bottom: 4px;">• <b>4維打分細項</b>: {selected_row.get('score_detail', '客觀4維加總')}</div>
-            <div>• <b>實戰點位</b>: 入場價 <b>${float(selected_row.get('entry', 0)):,.2f}</b> | 止損價 <b>${float(selected_row.get('sl', 0)):,.2f}</b> | 2R止盈 <b>${float(selected_row.get('tp', 0)):,.2f}</b> | 實際出場 <b>${float(selected_row.get('exit_price', 0)):,.2f}</b></div>
-        </div>
-        """, unsafe_allow_html=True)
     else:
         st.info(f"💡 【{sel_month}】當前暫無訊號記錄，系統正在以 3 秒頻率即時監控 5M 走勢中...")
-
-    if selected_row is not None:
-        is_win = selected_row.get('status') == 'WIN_TP'
-        res_text = "🟢 WIN 止盈成功 (+2.0R / 獲利 +$400.00 USD)" if is_win else ("🔴 LOSS 觸發止損 (-1.0R / 虧損 -$200.00 USD)" if selected_row.get('status') == 'LOSS_SL' else "⏳ 監控持倉中")
-        audit_log = f"""=== 癸水 · 0DTE 策略復盤與審核日誌 (0DTE TRADE AUDIT LOG) ===
-[1. 訂單時序] 日期: {selected_row.get('date', '--')} | 入場: {selected_row.get('time_myt', '--')} MYT ({selected_row.get('time_et', '--')} ET) ➔ 出場: {selected_row.get('exit_time_et', '--')} ET
-[2. 交易決策] 標的: {target_code} | 方向: {selected_row.get('direction', '--')} | 推薦合約: {selected_row.get('opt_symbol', '--')} | 入場價: ${float(selected_row.get('entry', 0)):,.2f}
-[3. 為什麼買]
-  • 形態與戰區: {selected_row.get('reason', '--')}
-  • 客觀評分: {selected_row.get('score', 0)} 分 (門檻 ≥75 分)
-  • 打分拆解: {selected_row.get('score_detail', '--')}
-[4. 最終結果] {res_text}
-  • 止損防守價: ${float(selected_row.get('sl', 0)):,.2f} | 止盈目標價: ${float(selected_row.get('tp', 0)):,.2f} | 實際出場: ${float(selected_row.get('exit_price', 0)):,.2f}
-=================================================="""
-    else:
-        audit_log = f"""=== 癸水 · 0DTE 策略復盤日誌 ===
-• 標的: {target_code} | 當前狀態: 實盤監控中 (尚未產生 2B 扳機訊號)
-• 本地 CSV 帳本已就緒: market_data/strategy_live_journal.csv
-============================================"""
-
-    with st.expander("📋 [AI 策略軍師] 0DTE 做功課審核日誌 (Trade Audit Log · 點擊右上角一鍵複製)", expanded=False):
-        st.caption("點擊右上角按鈕一鍵複製完整做功課日誌，貼入外部 AI 進行勝率復盤：")
-        st.code(audit_log, language="text")
 
 def render_0dte_cockpit_view(assets=None):
     """0DTE 主入口：雙 Tab 結構"""
