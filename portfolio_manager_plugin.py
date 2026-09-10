@@ -1,6 +1,7 @@
 # 文件名: portfolio_engine.py
 # 職責: 模組 A 賬戶與持倉中樞 (直連 OpenD 讀取真實 NAV / Cash / 持倉 + 新股 Auto-Fetch)
 
+import os
 import pandas as pd
 from data_engine import hub_engine
 
@@ -68,7 +69,7 @@ class PortfolioEngine:
                 for _, p_row in pos_df.iterrows():
                     p_code = str(p_row.get("code", ""))
                     if p_code and p_code not in known_assets:
-                        # 新發現標的，自動補齊歷史 CSV
+                        # 新標的自動補齊歷史 CSV
                         hub_engine.sync_asset_deep_history(p_code, bars_5m=500, bars_day=150)
                 
             trd_ctx.close()
