@@ -1,5 +1,5 @@
-# 文件名: data_engine.py
-# 職責: 模組 A 數據中樞 (全時段 5M/1H/DAY 連續錄影 + 斷點自愈 + 關鍵位提取 + 歷史落盤)
+﻿# 文件名: data_engine.py
+# 職責: 模組 A 數據中樞 (5M 全時段分頁拉取 + 今日 get_cur_kline 實時拼接 + 1H 本地重採樣聚合 + PMH/PML 戰區提取)
 
 import os
 import time
@@ -15,49 +15,38 @@ tz_my = pytz.timezone("Asia/Kuala_Lumpur")
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.join(BASE_DIR, "market_data")
 WATCHLIST_PATH = os.path.join(BASE_DIR, "watchlist.json")
-LOG_PATH = os.path.join(BASE_DIR, "system_audit.log")
 
 if not os.path.exists(DATA_DIR):
     os.makedirs(DATA_DIR, exist_ok=True)
 
 def get_active_session_info():
-    """判定當前美股交易時段 (盤前/常規/午休/盤後/休市)"""
+    """判定美股當前時段"""
     now_ny = datetime.datetime.now(tz_ny)
-    weekday = now_ny.weekday() # 0-4 為週一至週五
-    
+    weekday = now_ny.weekday()
     if weekday >= 5:
         return "WEEKEND", "🌴 週末休市", now_ny
         
     cur_time = now_ny.time()
-    t_pre_start = datetime.time(4, 0)
-    t_mkt_open = datetime.time(9, 30)
-    t_lunch_start = datetime.time(12, 0)
-    t_lunch_end = datetime.time(13, 30)
-    t_mkt_close = datetime.time(16, 0)
-    t_post_end = datetime.time(20, 0)
-    
-    if t_pre_start <= cur_time < t_mkt_open:
+    if datetime.time(4, 0) <= cur_time < datetime.time(9, 30):
         return "PRE_MARKET", "🌅 美股盤前 (04:00~09:30)", now_ny
-    elif t_mkt_open <= cur_time < t_lunch_start:
+    elif datetime.time(9, 30) <= cur_time < datetime.time(12, 0):
         return "REGULAR_MORNING", "⚡ 晨盤早戰區 (09:30~12:00)", now_ny
-    elif t_lunch_start <= cur_time < t_lunch_end:
+    elif datetime.time(12, 0) <= cur_time < datetime.time(13, 30):
         return "LUNCH_LULL", "⚠️ 美東午休垃圾時間 (12:00~13:30 鎖定)", now_ny
-    elif t_lunch_end <= cur_time < t_mkt_close:
+    elif datetime.time(13, 30) <= cur_time < datetime.time(16, 0):
         return "REGULAR_AFTERNOON", "🔥 尾盤決戰區 (13:30~16:00)", now_ny
-    elif t_mkt_close <= cur_time < t_post_end:
+    elif datetime.time(16, 0) <= cur_time < datetime.time(20, 0):
         return "POST_MARKET", "🌙 美股盤後 (16:00~20:00)", now_ny
     else:
         return "CLOSED", "💤 夜間休市 (20:00~04:00)", now_ny
 
 
 class MarketDataEngine:
-    """市場全時段數據引擎"""
-    def __init__(self):
-        self.host = "127.0.0.1"
-        self.port = 11111
+    def __init__(self, host="127.0.0.1", port=11111):
+        self.host = host
+        self.port = port
 
     def load_watchlist(self):
-        """讀取 12 檔核心監控資產"""
         if not os.path.exists(WATCHLIST_PATH):
             return []
         try:
@@ -83,41 +72,78 @@ class MarketDataEngine:
         except Exception:
             return pd.DataFrame()
 
-    def sync_asset_deep_history(self, code: str, bars_5m: int = 1500, bars_day: int = 250):
-        """全時段連續錄影與歷史對齊 (5M 全時段 + 1H 聚合 + DAY)"""
+    def sync_asset_deep_history(self, code: str, max_bars: int = 1500):
+        """
+        拉取 5M 全時段 (04:00~20:00) 歷史 + 今日實時柱，並在本地聚合為連續無斷層的 1H 與 DAY CSV
+        """
         try:
-            from moomoo import OpenQuoteContext, SubType, KLType, AuType, RET_OK
+            from moomoo import OpenQuoteContext, KLType, AuType, SubType, RET_OK
             quote_ctx = OpenQuoteContext(host=self.host, port=self.port)
+            now_ny = datetime.datetime.now(tz_ny)
             
-            # 1. 抓取 5M (含盤前盤後)
-            ret_5m, df_5m, _ = quote_ctx.request_history_kline(
-                code=code,
-                ktype=KLType.K_5M,
-                autype=AuType.NONE,
-                max_count=bars_5m
-            )
+            # 1. 訂閱實時行情權限
+            try:
+                quote_ctx.subscribe([code], [SubType.K_5M, SubType.K_DAY])
+            except Exception:
+                pass
+
+            # 2. 抓取今日正在撮合的 5M 實時柱
+            ret_cur, df_cur_5m = quote_ctx.get_cur_kline(code=code, num=100, ktype=KLType.K_5M, autype=AuType.NONE)
+
+            # 3. 分頁回溯抓取近 25 天全時段 5M 歷史
+            end_date_str = now_ny.strftime("%Y-%m-%d %H:%M:%S")
+            start_date_5m = (now_ny - datetime.timedelta(days=25)).strftime("%Y-%m-%d")
             
-            # 2. 抓取 DAY
+            all_5m_hist = []
+            page_key = None
+            while True:
+                ret_h, df_chunk, page_key = quote_ctx.request_history_kline(
+                    code=code,
+                    start=start_date_5m,
+                    end=end_date_str,
+                    ktype=KLType.K_5M,
+                    autype=AuType.NONE,
+                    max_count=1000,
+                    page_req_key=page_key,
+                    extended_time=True  # 開啟盤前盤後
+                )
+                if ret_h == RET_OK and not df_chunk.empty:
+                    all_5m_hist.append(df_chunk)
+                if page_key is None or len(all_5m_hist) >= 3:
+                    break
+                time.sleep(0.3)
+
+            # 4. 抓取日線 DAY
+            start_date_day = (now_ny - datetime.timedelta(days=365)).strftime("%Y-%m-%d")
             ret_day, df_day, _ = quote_ctx.request_history_kline(
                 code=code,
+                start=start_date_day,
+                end=end_date_str,
                 ktype=KLType.K_DAY,
                 autype=AuType.NONE,
-                max_count=bars_day
+                max_count=300
             )
             quote_ctx.close()
 
-            # 落盤 5M
-            if ret_5m == RET_OK and not df_5m.empty:
-                df_5m["time_key"] = pd.to_datetime(df_5m["time_key"])
-                df_5m = df_5m.sort_values("time_key").drop_duplicates(subset=["time_key"], keep="last")
-                df_5m.to_csv(self.get_csv_path(code, "5M"), index=False)
+            # 合併 5M 數據 (歷史 + 今日實時)
+            frames_5m = []
+            if all_5m_hist:
+                frames_5m.extend(all_5m_hist)
+            if ret_cur == RET_OK and not df_cur_5m.empty:
+                frames_5m.append(df_cur_5m)
+
+            if frames_5m:
+                df_5m_all = pd.concat(frames_5m, ignore_index=True)
+                df_5m_all["time_key"] = pd.to_datetime(df_5m_all["time_key"])
+                df_5m_all = df_5m_all.sort_values("time_key").drop_duplicates(subset=["time_key"], keep="last").tail(max_bars)
+                df_5m_all.to_csv(self.get_csv_path(code, "5M"), index=False)
                 
-                # 本地聚合 1H
-                df_1h = self._resample_5m_to_1h(df_5m)
+                # 5. 本地重採樣生成 100% 連續包含盤前盤後的 1H CSV
+                df_1h = self._resample_5m_to_1h(df_5m_all)
                 if not df_1h.empty:
                     df_1h.to_csv(self.get_csv_path(code, "1H"), index=False)
 
-            # 落盤 DAY
+            # 落盤日線
             if ret_day == RET_OK and not df_day.empty:
                 df_day["time_key"] = pd.to_datetime(df_day["time_key"])
                 df_day = df_day.sort_values("time_key").drop_duplicates(subset=["time_key"], keep="last")
@@ -128,7 +154,7 @@ class MarketDataEngine:
             return False, str(e)
 
     def _resample_5m_to_1h(self, df_5m: pd.DataFrame) -> pd.DataFrame:
-        """將 5M 柱線重採樣合成為精確 1H K線"""
+        """標準 60 分鐘幾何聚合：以 04:00 為起始錨點，每 12 根 5M 聚合 1 根 1H"""
         if df_5m.empty:
             return pd.DataFrame()
         df = df_5m.copy()
@@ -138,22 +164,14 @@ class MarketDataEngine:
             "high": "max",
             "low": "min",
             "close": "last",
-            "volume": "sum",
-            "turnover": "sum"
+            "volume": "sum"
         }
-        if "code" in df.columns:
-            agg_dict["code"] = "first"
-        if "name" in df.columns:
-            agg_dict["name"] = "first"
-
-        df_1h = df.resample("1h", closed="left", label="left").agg(agg_dict).dropna(subset=["close"]).reset_index()
-        return df_1h
+        if "turnover" in df.columns:
+            agg_dict["turnover"] = "sum"
+        return df.resample("1h", closed="left", label="left").agg(agg_dict).dropna(subset=["close"]).reset_index()
 
     def extract_key_levels(self, code: str) -> dict:
-        """提取 PDH/PDL (昨日極值) 與 PMH/PML (盤前極值)"""
         levels = {"PDH": None, "PDL": None, "PDC": None, "PMH": None, "PML": None, "CUR_PRICE": None}
-        
-        # 讀取日線取昨日極值
         df_day = self.load_local_kline(code, "DAY")
         if len(df_day) >= 2:
             prev_row = df_day.iloc[-2]
@@ -162,13 +180,10 @@ class MarketDataEngine:
             levels["PDC"] = float(prev_row["close"])
             levels["CUR_PRICE"] = float(df_day.iloc[-1]["close"])
 
-        # 讀取 5M 取今日盤前極值 (美東 04:00~09:30)
         df_5m = self.load_local_kline(code, "5M")
         if not df_5m.empty:
             latest_time = df_5m["time_key"].max()
             today_str = latest_time.strftime("%Y-%m-%d")
-            
-            # 過濾今日盤前
             df_pm = df_5m[
                 (df_5m["time_key"].dt.strftime("%Y-%m-%d") == today_str) &
                 (df_5m["time_key"].dt.time >= datetime.time(4, 0)) &
@@ -177,12 +192,8 @@ class MarketDataEngine:
             if not df_pm.empty:
                 levels["PMH"] = float(df_pm["high"].max())
                 levels["PML"] = float(df_pm["low"].min())
-            
-            # 若有更即時的現價則更新
             levels["CUR_PRICE"] = float(df_5m.iloc[-1]["close"])
 
         return levels
 
-
-# 全域實例化 (解耦接口)
 hub_engine = MarketDataEngine()

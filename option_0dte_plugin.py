@@ -56,66 +56,55 @@ def init_0dte_journal_file():
 
 init_0dte_journal_file()
 
-def load_0dte_kline_live(code: str = "US.QQQ"):
-    """加载 5M 数据并注入 OpenD 最新实时跳动点位"""
-    clean_code = code.replace('.', '_')
-    p_5m = os.path.join(DATA_DIR, f"{clean_code}_5M.csv")
-    p_day = os.path.join(DATA_DIR, f"{clean_code}_DAY.csv")
 
-    df_5m = pd.DataFrame()
-    df_day = pd.DataFrame()
-
-    if os.path.exists(p_5m):
-        try:
-            df = pd.read_csv(p_5m)
-            df.columns = [c.lower().strip() for c in df.columns]
-            t_col = 'time_key' if 'time_key' in df.columns else df.columns[0]
-            df['dt'] = pd.to_datetime(df[t_col])
-            for col in ['open', 'high', 'low', 'close', 'volume']:
-                df[col] = pd.to_numeric(df[col], errors='coerce')
-            df_5m = df.dropna().drop_duplicates('dt').sort_values('dt').reset_index(drop=True)
-        except Exception:
-            pass
-
-    if os.path.exists(p_day):
-        try:
-            df = pd.read_csv(p_day)
-            df.columns = [c.lower().strip() for c in df.columns]
-            for col in ['open', 'high', 'low', 'close', 'volume']:
-                df[col] = pd.to_numeric(df[col], errors='coerce')
-            df_day = df.dropna().reset_index(drop=True)
-        except Exception:
-            pass
-
+def load_0dte_kline_live(code='US.QQQ'):
+    import pandas as pd
+    from data_engine import hub_engine
+    
+    # 1. 讀取本地 5M 與 DAY 歷史
+    df_5m = hub_engine.load_local_kline(code, '5M')
+    df_day = hub_engine.load_local_kline(code, 'DAY')
+    
+    # 2. 向 OpenD 訂閱並提取今日最新實時 5M 柱
     try:
-        snap_df = hub_engine.get_realtime_snapshot([code])
-        if snap_df is not None and not snap_df.empty:
-            row = snap_df.iloc[0]
-            live_price = float(row.get('last_price', row.get('cur_price', 0.0)))
-            if live_price > 0:
-                now_ny = datetime.datetime.now(tz_ny)
-                cur_min = (now_ny.minute // 5) * 5
-                live_5m_dt = now_ny.replace(minute=cur_min, second=0, microsecond=0).replace(tzinfo=None)
-                
-                if not df_5m.empty:
-                    last_row_dt = df_5m.iloc[-1]['dt']
-                    if last_row_dt == live_5m_dt:
-                        df_5m.at[df_5m.index[-1], 'close'] = live_price
-                        df_5m.at[df_5m.index[-1], 'high'] = max(df_5m.at[df_5m.index[-1], 'high'], live_price)
-                        df_5m.at[df_5m.index[-1], 'low'] = min(df_5m.at[df_5m.index[-1], 'low'], live_price)
-                    elif live_5m_dt > last_row_dt:
-                        new_k = {
-                            'dt': live_5m_dt,
-                            'time_key': live_5m_dt.strftime('%Y-%m-%d %H:%M:%S'),
-                            'open': live_price,
-                            'high': live_price,
-                            'low': live_price,
-                            'close': live_price,
-                            'volume': float(row.get('volume', 1000.0))
-                        }
-                        df_5m = pd.concat([df_5m, pd.DataFrame([new_k])], ignore_index=True)
+        from moomoo import OpenQuoteContext, KLType, AuType, SubType, RET_OK
+        ctx = OpenQuoteContext(host='127.0.0.1', port=11111)
+        ctx.subscribe([code], [SubType.K_5M])
+        ret, df_cur = ctx.get_cur_kline(code=code, num=20, ktype=KLType.K_5M, autype=AuType.NONE)
+        ctx.close()
+        
+        if ret == RET_OK and not df_cur.empty:
+            if not df_5m.empty:
+                df_5m = pd.concat([df_5m, df_cur], ignore_index=True)
+            else:
+                df_5m = df_cur
     except Exception:
         pass
+
+    # 3. 欄位清洗與防呆：嚴格生成 dt 欄位以支援 0DTE 計算大腦
+    if not df_5m.empty:
+        df_5m.columns = [c.lower().strip() for c in df_5m.columns]
+        t_col = 'time_key' if 'time_key' in df_5m.columns else df_5m.columns[0]
+        df_5m['time_key'] = pd.to_datetime(df_5m[t_col])
+        df_5m['dt'] = df_5m['time_key']
+        for col in ['open', 'high', 'low', 'close', 'volume']:
+            if col in df_5m.columns:
+                df_5m[col] = pd.to_numeric(df_5m[col], errors='coerce')
+        df_5m = df_5m.dropna(subset=['close']).drop_duplicates(subset=['time_key'], keep='last').sort_values('time_key').reset_index(drop=True)
+        # 自動保存
+        try:
+            df_5m.to_csv(hub_engine.get_csv_path(code, '5M'), index=False)
+        except Exception:
+            pass
+
+    if not df_day.empty:
+        df_day.columns = [c.lower().strip() for c in df_day.columns]
+        t_col_d = 'time_key' if 'time_key' in df_day.columns else df_day.columns[0]
+        df_day['dt'] = pd.to_datetime(df_day[t_col_d])
+        for col in ['open', 'high', 'low', 'close', 'volume']:
+            if col in df_day.columns:
+                df_day[col] = pd.to_numeric(df_day[col], errors='coerce')
+        df_day = df_day.dropna(subset=['close']).drop_duplicates(subset=['dt'], keep='last').sort_values('dt').reset_index(drop=True)
 
     return df_5m, df_day
 
