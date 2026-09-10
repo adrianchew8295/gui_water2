@@ -1,0 +1,4 @@
+
+.env
+*.env
+market_data/*.csv

@@ -197,3 +197,44 @@ class MarketDataEngine:
         return levels
 
 hub_engine = MarketDataEngine()
+
+
+def get_moomoo_real_portfolio(host='127.0.0.1', port=11111):
+    """直連 OpenD 提取 FUTUMY 真實美股帳戶資產與持倉"""
+    try:
+        from moomoo import OpenSecTradeContext, TrdMarket, TrdEnv, Currency, RET_OK
+        import pandas as pd
+        
+        trd_ctx = OpenSecTradeContext(filter_trdmarket=TrdMarket.NONE, host=host, port=port)
+        ret_acc, acc_list = trd_ctx.get_acc_list()
+        
+        if ret_acc != RET_OK or acc_list.empty:
+            trd_ctx.close()
+            return None, None, '無法獲取帳戶列表'
+            
+        real_accs = acc_list[acc_list['trd_env'] == 'REAL']
+        target_acc = real_accs.iloc[0] if not real_accs.empty else acc_list.iloc[0]
+        trd_env = TrdEnv.REAL if not real_accs.empty else TrdEnv.SIMULATE
+        target_acc_id = int(target_acc['acc_id'])
+        
+        # 1. 查詢資金概況 (USD)
+        ret_funds, df_funds = trd_ctx.accinfo_query(trd_env=trd_env, acc_id=target_acc_id, currency=Currency.USD)
+        fund_summary = {}
+        if ret_funds == RET_OK and not df_funds.empty:
+            f_row = df_funds.iloc[0]
+            fund_summary = {
+                'total_assets': float(f_row.get('total_assets', 0.0) or 0.0),
+                'cash': float(f_row.get('cash', 0.0) or 0.0),
+                'market_val': float(f_row.get('market_val', 0.0) or 0.0),
+                'unrealized_pl': float(f_row.get('unrealized_pl', 0.0) or 0.0)
+            }
+            
+        # 2. 查詢持倉明細
+        ret_pos, df_pos = trd_ctx.position_list_query(trd_env=trd_env, acc_id=target_acc_id)
+        trd_ctx.close()
+        
+        if ret_pos == RET_OK:
+            return fund_summary, df_pos, 'OK'
+        return fund_summary, pd.DataFrame(), '持倉查詢空值'
+    except Exception as e:
+        return None, None, str(e)
