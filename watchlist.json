@@ -1,16 +1,77 @@
 {
   "assets": [
-    {"code": "US.QQQ", "name": "納指100 ETF", "category": "🚀 核心指數", "type": "STOCK"},
-    {"code": "US.NVDA", "name": "英偉達", "category": "🏛️ 科技巨頭", "type": "STOCK"},
-    {"code": "US.AAPL", "name": "蘋果", "category": "🏛️ 科技巨頭", "type": "STOCK"},
-    {"code": "US.MSFT", "name": "微軟", "category": "🏛️ 科技巨頭", "type": "STOCK"},
-    {"code": "US.AMZN", "name": "亞馬遜", "category": "🏛️ 科技巨頭", "type": "STOCK"},
-    {"code": "US.GOOGL", "name": "谷歌", "category": "🏛️ 科技巨頭", "type": "STOCK"},
-    {"code": "US.META", "name": "Meta", "category": "🏛️ 科技巨頭", "type": "STOCK"},
-    {"code": "US.TSLA", "name": "特斯拉", "category": "🏛️ 科技巨頭", "type": "STOCK"},
-    {"code": "US.AVGO", "name": "博通", "category": "💾 先鋒龍頭", "type": "STOCK"},
-    {"code": "US.MU", "name": "美光科技", "category": "💾 先鋒龍頭", "type": "STOCK"},
-    {"code": "US.AMD", "name": "超微半導體", "category": "💾 先鋒龍頭", "type": "STOCK"},
-    {"code": "US.WDC", "name": "西部數據", "category": "💾 先鋒龍頭", "type": "STOCK"}
+    {
+      "code": "US.QQQ",
+      "name": "納指100 ETF",
+      "category": "👑 大盤總舵",
+      "type": "STOCK",
+      "is_benchmark": true
+    },
+    {
+      "code": "US.NVDA",
+      "name": "英偉達 (NVDA)",
+      "category": "🏛️ 科技巨頭",
+      "type": "STOCK"
+    },
+    {
+      "code": "US.AAPL",
+      "name": "蘋果 (AAPL)",
+      "category": "🏛️ 科技巨頭",
+      "type": "STOCK"
+    },
+    {
+      "code": "US.MSFT",
+      "name": "微軟 (MSFT)",
+      "category": "🏛️ 科技巨頭",
+      "type": "STOCK"
+    },
+    {
+      "code": "US.AMZN",
+      "name": "亞馬遜 (AMZN)",
+      "category": "🏛️ 科技巨頭",
+      "type": "STOCK"
+    },
+    {
+      "code": "US.GOOGL",
+      "name": "谷歌 (GOOGL)",
+      "category": "🏛️ 科技巨頭",
+      "type": "STOCK"
+    },
+    {
+      "code": "US.META",
+      "name": "Meta (META)",
+      "category": "🏛️ 科技巨頭",
+      "type": "STOCK"
+    },
+    {
+      "code": "US.TSLA",
+      "name": "特斯拉 (TSLA)",
+      "category": "🏛️ 科技巨頭",
+      "type": "STOCK"
+    },
+    {
+      "code": "US.AVGO",
+      "name": "博通 (AVGO)",
+      "category": "🚀 先鋒龍頭",
+      "type": "STOCK"
+    },
+    {
+      "code": "US.MU",
+      "name": "美光 (MU)",
+      "category": "🚀 先鋒龍頭",
+      "type": "STOCK"
+    },
+    {
+      "code": "US.AMD",
+      "name": "超微半導體 (AMD)",
+      "category": "🚀 先鋒龍頭",
+      "type": "STOCK"
+    },
+    {
+      "code": "CC.BTCUSD",
+      "name": "比特幣現貨 (BTC)",
+      "category": "🪙 先鋒龍頭",
+      "type": "CRYPTO"
+    }
   ]
 }
