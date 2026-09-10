@@ -1,7 +1,10 @@
 ﻿# 文件名: app.py
-# 職責: 模組 C 前端 Output HUD 總裝 (資產水流 HUD + 12 檔雷達表 + AI 顧問冷血動作卡 + AI 診斷 Prompt 導出)
+# 職責: 模組 C 前端 Output HUD 總裝 (資產水流 HUD + 12 檔雷達表 + 動作卡 + TradingView 互動圖表 + AI Prompt)
 
+import os
+import json
 import streamlit as st
+import streamlit.components.v1 as components
 import datetime
 import pytz
 import pandas as pd
@@ -10,6 +13,7 @@ from portfolio_engine import portfolio_engine
 from strategy_engine import strategy_engine
 import option_0dte_plugin
 
+DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "market_data")
 tz_ny = pytz.timezone("America/New_York")
 tz_my = pytz.timezone("Asia/Kuala_Lumpur")
 
@@ -20,7 +24,7 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# 自定義暗黑主題 CSS
+# 暗黑金融主題 CSS
 st.markdown("""
 <style>
     .reportview-container { background: #0d1117; }
@@ -29,6 +33,206 @@ st.markdown("""
     .stMetric { background-color: #161b22; border: 1px solid #30363d; padding: 10px; border-radius: 6px; }
 </style>
 """, unsafe_allow_html=True)
+
+def render_embedded_tv_chart(code: str, ktype_str: str = "DAY", bars_count: int = 150):
+    """直接內建 TradingView 互動畫布 (消除外部模組參數衝突)"""
+    clean_name = str(code).replace(".", "_")
+    csv_path = os.path.join(DATA_DIR, f"{clean_name}_{ktype_str.upper()}.csv")
+
+    if not os.path.exists(csv_path):
+        st.warning(f"⚠️ 本地缺少數據文件: `{csv_path}`，請點擊上方按鈕一鍵補齊 12 檔數據！")
+        return
+
+    try:
+        df = pd.read_csv(csv_path)
+        if df.empty:
+            st.warning("⚠️ 數據文件為空。")
+            return
+
+        df.columns = [c.lower().strip() for c in df.columns]
+        if 'time_key' not in df.columns:
+            st.warning("⚠️ 缺少 time_key 時間戳欄位。")
+            return
+
+        df = df.drop_duplicates(subset=['time_key']).sort_values('time_key').tail(bars_count).reset_index(drop=True)
+
+        candles = []
+        volumes = []
+        session_ranges = []
+        is_crypto = str(code).startswith("CC.")
+        current_session_start = None
+
+        for idx, row in df.iterrows():
+            time_str = str(row['time_key'])
+            
+            if ktype_str.upper() == "DAY":
+                t_val = time_str[:10]
+                is_extended = False
+            else:
+                dt = pd.to_datetime(time_str)
+                t_val = int(dt.timestamp())
+                
+                if is_crypto:
+                    is_extended = False
+                else:
+                    hour = dt.hour
+                    minute = dt.minute
+                    is_extended = (4 <= hour < 9) or (hour == 9 and minute < 30) or (16 <= hour < 20)
+
+            o = float(row.get('open', 0.0))
+            h = float(row.get('high', 0.0))
+            l = float(row.get('low', 0.0))
+            c = float(row.get('close', 0.0))
+            v = float(row.get('volume', 0.0))
+
+            candles.append({"time": t_val, "open": o, "high": h, "low": l, "close": c})
+            vol_color = "rgba(0, 230, 118, 0.65)" if c >= o else "rgba(255, 82, 82, 0.65)"
+            volumes.append({"time": t_val, "value": v, "color": vol_color})
+
+            if is_extended:
+                if current_session_start is None:
+                    current_session_start = t_val
+            else:
+                if current_session_start is not None:
+                    session_ranges.append({"start": current_session_start, "end": t_val})
+                    current_session_start = None
+
+        if current_session_start is not None and candles:
+            session_ranges.append({"start": current_session_start, "end": candles[-1]["time"]})
+
+        candles_json = json.dumps(candles)
+        volumes_json = json.dumps(volumes)
+        sessions_json = json.dumps(session_ranges)
+
+        html_code = f"""
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <meta charset="utf-8" />
+            <script src="https://unpkg.com/lightweight-charts@4.1.1/dist/lightweight-charts.standalone.production.js"></script>
+            <style>
+                body {{ margin: 0; padding: 0; background-color: #0d1117; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; overflow: hidden; }}
+                #main_wrapper {{ position: relative; width: 100%; height: 380px; }}
+                #vol_wrapper {{ position: relative; width: 100%; height: 130px; margin-top: 4px; }}
+                .chart-box {{ width: 100%; height: 100%; position: absolute; z-index: 2; }}
+                .shading-layer {{ width: 100%; height: 100%; position: absolute; top: 0; left: 0; z-index: 1; pointer-events: none; }}
+                .chart-header {{ position: absolute; top: 6px; left: 10px; right: 10px; z-index: 10; display: flex; justify-content: space-between; align-items: center; pointer-events: none; }}
+                .badge-tag {{ font-size: 11px; font-weight: bold; color: #8b949e; background: rgba(22, 27, 34, 0.85); border: 1px solid #30363d; padding: 3px 8px; border-radius: 4px; }}
+            </style>
+        </head>
+        <body>
+            <div id="main_wrapper">
+                <div class="chart-header">
+                    <span class="badge-tag">📊 K線走勢 ({code} · {ktype_str.upper()})</span>
+                </div>
+                <canvas id="main_shading" class="shading-layer"></canvas>
+                <div id="main_chart" class="chart-box"></div>
+            </div>
+            <div id="vol_wrapper">
+                <div class="chart-header">
+                    <span class="badge-tag">機構量能 (Volume)</span>
+                </div>
+                <canvas id="vol_shading" class="shading-layer"></canvas>
+                <div id="vol_chart" class="chart-box"></div>
+            </div>
+
+            <script>
+                const mainWrapper = document.getElementById('main_wrapper');
+                const volWrapper = document.getElementById('vol_wrapper');
+                const mainCanvas = document.getElementById('main_shading');
+                const volCanvas = document.getElementById('vol_shading');
+                const ctxMain = mainCanvas.getContext('2d');
+                const ctxVol = volCanvas.getContext('2d');
+
+                function resizeCanvases() {{
+                    mainCanvas.width = mainWrapper.clientWidth;
+                    mainCanvas.height = mainWrapper.clientHeight;
+                    volCanvas.width = volWrapper.clientWidth;
+                    volCanvas.height = volWrapper.clientHeight;
+                }}
+                resizeCanvases();
+
+                const commonOptions = {{
+                    layout: {{ background: {{ type: 'solid', color: 'transparent' }}, textColor: '#8b949e', fontSize: 11 }},
+                    grid: {{ vertLines: {{ color: '#161b22' }}, horzLines: {{ color: '#161b22' }} }},
+                    crosshair: {{ mode: LightweightCharts.CrosshairMode.Normal }},
+                    rightPriceScale: {{ borderColor: '#30363d', autoScale: true }},
+                    timeScale: {{ borderColor: '#30363d', timeVisible: true, secondsVisible: false }},
+                    handleScroll: {{ mouseWheel: true, pressedMouseMove: true, horzTouchDrag: true, vertTouchDrag: true }},
+                    handleScale: {{ axisPressedMouseMove: true, mouseWheel: true, pinch: true }}
+                }};
+
+                const mainChart = LightweightCharts.createChart(document.getElementById('main_chart'), {{
+                    ...commonOptions,
+                    timeScale: {{ ...commonOptions.timeScale, visible: false }},
+                }});
+                const mainSeries = mainChart.addCandlestickSeries({{
+                    upColor: '#00E676', downColor: '#FF5252', borderVisible: false, wickUpColor: '#00E676', wickDownColor: '#FF5252'
+                }});
+                mainSeries.setData({candles_json});
+
+                const volChart = LightweightCharts.createChart(document.getElementById('vol_chart'), {{
+                    ...commonOptions,
+                    rightPriceScale: {{ borderColor: '#30363d', autoScale: true, scaleMargins: {{ top: 0.1, bottom: 0 }} }}
+                }});
+                const volumeSeries = volChart.addHistogramSeries({{
+                    priceFormat: {{ type: 'volume' }},
+                }});
+                volumeSeries.setData({volumes_json});
+
+                let isSyncing = false;
+                mainChart.timeScale().subscribeVisibleLogicalRangeChange(range => {{
+                    if (isSyncing || !range) return;
+                    isSyncing = true;
+                    volChart.timeScale().setVisibleLogicalRange(range);
+                    isSyncing = false;
+                    drawShadings();
+                }});
+
+                volChart.timeScale().subscribeVisibleLogicalRangeChange(range => {{
+                    if (isSyncing || !range) return;
+                    isSyncing = true;
+                    mainChart.timeScale().setVisibleLogicalRange(range);
+                    isSyncing = false;
+                    drawShadings();
+                }});
+
+                const sessionRanges = {sessions_json};
+                function drawShadings() {{
+                    ctxMain.clearRect(0, 0, mainCanvas.width, mainCanvas.height);
+                    ctxVol.clearRect(0, 0, volCanvas.width, volCanvas.height);
+                    const ts = mainChart.timeScale();
+                    ctxMain.fillStyle = 'rgba(255, 255, 255, 0.04)';
+                    ctxVol.fillStyle = 'rgba(255, 255, 255, 0.04)';
+
+                    for (const s of sessionRanges) {{
+                        const x1 = ts.timeToCoordinate(s.start);
+                        const x2 = ts.timeToCoordinate(s.end);
+                        if (x1 !== null && x2 !== null) {{
+                            const left = Math.min(x1, x2);
+                            const width = Math.abs(x2 - x1);
+                            ctxMain.fillRect(left, 0, width, mainCanvas.height);
+                            ctxVol.fillRect(left, 0, width, volCanvas.height);
+                        }}
+                    }}
+                }}
+
+                setTimeout(drawShadings, 150);
+
+                window.addEventListener('resize', () => {{
+                    resizeCanvases();
+                    mainChart.applyOptions({{ width: mainWrapper.clientWidth }});
+                    volChart.applyOptions({{ width: volWrapper.clientWidth }});
+                    drawShadings();
+                }});
+            </script>
+        </body>
+        </html>
+        """
+        components.html(html_code, height=540)
+    except Exception as e:
+        st.error(f"❌ 圖表渲染異常: {str(e)}")
+
 
 # 頂部狀態列
 session_key, session_desc, now_ny = get_active_session_info()
@@ -108,7 +312,6 @@ if "1. 宏觀雷達" in menu:
         name = a["name"]
         cat = a.get("category", "標的")
         
-        # 波段策略計算
         res = strategy_engine.evaluate_swing_tactical(
             code=code,
             total_nav=acc_summary['total_assets'],
@@ -136,11 +339,10 @@ if "1. 宏觀雷達" in menu:
     df_radar = pd.DataFrame(radar_rows)
 
     # -------------------------------------------------------------------------
-    # 模組二：12 檔標的雷達全景表 (置頂 QQQ，按評級排序)
+    # 模組二：12 檔標的雷達全景表 (置頂 QQQ)
     # -------------------------------------------------------------------------
     st.markdown("#### 📡 模組二：12 檔標的宏觀雷達表 (QQQ 總舵置頂)")
     if not df_radar.empty:
-        # 置頂 QQQ
         is_qqq = df_radar['代碼'] == 'US.QQQ'
         df_display = pd.concat([df_radar[is_qqq], df_radar[~is_qqq]]).reset_index(drop=True)
         display_cols = ["代碼", "名稱", "板塊分類", "現價", "大趨勢", "距EMA20", "排雷狀態", "AI 操作評級", "建議股數"]
@@ -161,19 +363,20 @@ if "1. 宏觀雷達" in menu:
     # 模組三：AI 顧問冷血動作卡
     # -------------------------------------------------------------------------
     st.markdown("#### 🛡️ 模組三：AI 顧問冷血動作卡 (波段部署指令)")
-    col_sel, _ = st.columns([3, 7])
+    col_sel, col_ktype = st.columns([3, 2])
     with col_sel:
         target_card_code = st.selectbox(
-            "🎯 選擇查看具體標的動作卡",
+            "🎯 選擇查看標的圖表與動作卡",
             [a["code"] for a in assets_list],
             index=0
         )
+    with col_ktype:
+        chart_ktype = st.selectbox("週期切換", ["DAY (日線宏觀)", "1H (1小時戰區)", "5M (5分鐘微觀)"], index=0)
 
     matched_card = next((c for c in tactical_cards if c[0] == target_card_code), None)
     if matched_card:
         _, t_name, c_res, c_guard = matched_card
         
-        # 動作卡樣式卡片
         border_color = "#00e676" if "推薦" in c_res['rating'] else ("#ffd600" if "嚴禁" in c_res['rating'] else "#30363d")
         bg_color = "rgba(0, 230, 118, 0.08)" if "推薦" in c_res['rating'] else ("rgba(255, 214, 0, 0.08)" if "嚴禁" in c_res['rating'] else "#161b22")
         
@@ -195,6 +398,15 @@ if "1. 宏觀雷達" in menu:
             </div>
         </div>
         """, unsafe_allow_html=True)
+
+    # -------------------------------------------------------------------------
+    # 📈 專業 TradingView 互動圖表穿透視圖 (Zoom / Drag / 雙窗格)
+    # -------------------------------------------------------------------------
+    st.markdown(f"#### 📈 TradingView 互動圖表穿透 · `{target_card_code}`")
+    ktype_key = "DAY" if "DAY" in chart_ktype else ("1H" if "1H" in chart_ktype else "5M")
+    
+    # 內建原生渲染，徹底告別插件參數不匹配
+    render_embedded_tv_chart(target_card_code, ktype_key)
 
     st.markdown("---")
 
@@ -225,7 +437,6 @@ if "1. 宏觀雷達" in menu:
         st.text_area("可直接複製以下內容投餵給 AI：", prompt_text, height=220)
 
 elif "2. 0DTE" in menu:
-    # 調用 0DTE 期權戰術射控艙模組
     option_0dte_plugin.render_0dte_cockpit_view(assets=assets_list)
 
 elif "3. 實盤帳戶" in menu:
